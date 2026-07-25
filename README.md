@@ -1,12 +1,10 @@
-# Chess Analyzer - User Script
+## Installation
 
-## Cara Install
-
-1. Install ekstensi pengelola script di browser Anda (contoh: Violentmonkey, Tampermonkey, atau sejenisnya).
-2. Buka ekstensi tersebut dan pilih opsi untuk **Membuat script baru**.
-3. Salin seluruh isi kode dari file `userscript.js`.
-4. Tempelkan ke dalam editor script tersebut, lalu klik **Simpan**.
-5. Muat ulang halaman web catur Anda dan fitur analyzer siap digunakan!
+1. Install a userscript manager extension in your browser (e.g., Violentmonkey).
+2. Open your userscript manager and select **Create a new script**.
+3. Copy all the code from the `userscript.js` file in this repository.
+4. Paste the code into the script editor and click **Save**.
+5. Refresh your chess game page, and the analyzer is ready to use!
 
 ## Troubleshooting
 
