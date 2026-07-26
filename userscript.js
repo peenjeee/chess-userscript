@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      2.0
 // @description  Chess Analyzer
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -215,7 +215,7 @@
     let obs = new MutationObserver((m, o) => {
         let board = document.querySelector(".board-layout-main");
         if (!board) return;
-        board.insertAdjacentHTML('afterbegin', `<div style="display:flex;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;"><button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button></div>`);
+        board.insertAdjacentHTML('afterbegin', `<div id="sa-wrap" style="display:flex;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;"><button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button></div>`);
         document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
         o.disconnect();
     });
@@ -225,6 +225,10 @@
         if (e.key.toLowerCase() === 'a' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
             let btn = document.getElementById("sa-btn");
             if (btn) btn.click();
+        }
+        if (e.key === 'Insert') {
+            let wrap = document.getElementById("sa-wrap");
+            if (wrap) wrap.style.display = wrap.style.display === 'none' ? 'flex' : 'none';
         }
     });
 
