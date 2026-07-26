@@ -6,6 +6,11 @@
 4. Paste the code into the script editor and click **Save**.
 5. Refresh your chess game page, and the analyzer is ready to use!
 
+## Hotkeys
+
+- **A** — Start or stop the analyzer.
+- **Insert** — Hide or show the analyzer button. Useful for keeping the interface clean; the **'A'** hotkey still works while the button is hidden.
+
 ## Troubleshooting
 
 - **Analyzer is stuck or arrows don't appear:** If the engine stops responding or the arrows freeze, simply press the **'A'** key twice (to turn it off and on again). This will instantly reset the engine memory and resync it with the current board position.
