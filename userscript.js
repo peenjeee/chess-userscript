@@ -1,7 +1,7 @@
     // ==UserScript==
     // @name         Chess Analyzer
     // @namespace    http://tampermonkey.net/
-    // @version      2.2
+    // @version      2.3
     // @description  Chess analyzer with full Stockfish 18 NNUE, lichess support, and web-app relay
     // @author       Peenjeee
     // @match        https://www.chess.com/*
@@ -9,10 +9,10 @@
     // @grant        GM_xmlhttpRequest
     // @grant        GM.xmlHttpRequest
     // @connect      chess.0xpnj.dev
-    // @connect      ntfy.sh
+    // @connect      localhost
     // ==/UserScript==
 
-    (function() {
+    (function () {
         'use strict';
 
         const SITE = location.hostname.includes('lichess') ? 'lichess' : 'chesscom';
@@ -25,9 +25,12 @@
         const CC_FALLBACK = "/bundles/app/js/vendor/jschessengine/stockfish.asm.1abfa10c.js";
         const CLOUD_EVAL = "https://lichess.org/api/cloud-eval";
 
-        // Relay (mirrors the game to the Chess Analyzer web app via ntfy.sh)
-        const NTFY = 'https://ntfy.sh';
-        const RELAY_PREFIX = 'chessweb-';
+        // Relay: POST positions to both localhost (dev) and prod simultaneously.
+        // Whichever server is running will accept it; the other fails silently.
+        const RELAY_URLS = [
+            'http://localhost:5173/api/relay/',
+            'https://chess.0xpnj.dev/api/relay/'
+        ];
         const RELAY_KEY = 'chessweb-relay-id';
 
         // ---------------------------------------------------- CSP-safe transport
@@ -173,6 +176,10 @@
             let flipped = !!wrap && wrap.classList.contains('orientation-black');
             let size = b.getBoundingClientRect().width / 8;
             if (!size) return null;
+
+            // Ghost piece = chessground drag in progress; reading now gives the
+            // cursor position, not the real board state — skip until drop.
+            if (b.querySelector('piece.ghost')) return null;
 
             const TYPES = { pawn: 'p', knight: 'n', bishop: 'b', rook: 'r', queen: 'q', king: 'k' };
             let sqOf = (el) => {
@@ -539,12 +546,6 @@
         }
         let relayLastFen = "";
         let relayEndSent = false;
-        let relayEverOk = false;
-        let relayBlocked = false;
-
-        function markRelayBlocked() {
-            relayBlocked = true;
-        }
 
         function readPlayers(flipped) {
             let t = sel => document.querySelector(sel)?.textContent?.trim() || "";
@@ -572,31 +573,50 @@
         }
 
         function publish(payload) {
-            if (relayBlocked) return;
-            let url = NTFY + '/' + RELAY_PREFIX + sessionId;
             let body = JSON.stringify(payload);
-            fetch(url, { method: 'POST', body })
-                .then(() => { relayEverOk = true; })
-                .catch(() => {
-                    // page CSP (lichess) — retry through the GM transport
-                    if (hasGM) {
-                        gmRequest({ method: 'POST', url, data: body })
-                            .then(() => { relayEverOk = true; })
-                            .catch(() => { if (SITE === 'lichess' && !relayEverOk) markRelayBlocked(); });
-                    } else if (SITE === 'lichess' && !relayEverOk) {
-                        markRelayBlocked();
-                    }
+            for (let base of RELAY_URLS) {
+                let url = base + sessionId;
+                fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body
+                }).catch(() => {
+                    // CSP fallback via GM transport (lichess)
+                    if (hasGM) gmRequest({ method: 'POST', url, data: body });
                 });
+            }
+        }
+
+        // Read the full move list from chess.com's DOM in SAN notation.
+        // Chess.com marks each half-move with a [data-node-ply] attribute;
+        // fall back to .node elements inside the move list container.
+        function readMovesCC() {
+            // Primary: data-node-ply attribute — sort by ply to ensure order
+            let byPly = document.querySelectorAll('wc-simple-move-list [data-node-ply]');
+            if (byPly.length) {
+                return Array.from(byPly)
+                    .sort((a, b) => (+a.getAttribute('data-node-ply') || 0) - (+b.getAttribute('data-node-ply') || 0))
+                    .map(n => n.textContent?.trim().replace(/[?!]+$/, '').trim())
+                    .filter(s => s && !/^\d+\.+$/.test(s));
+            }
+            // Fallback: .node inside wc-simple-move-list
+            let nodes = document.querySelectorAll('wc-simple-move-list .node');
+            return Array.from(nodes)
+                .map(n => n.textContent?.trim().replace(/[?!]+$/, '').trim())
+                .filter(s => s && !/^\d+\.+$/.test(s));
         }
 
         function relayTick() {
             let pos = readBoard();
             if (!pos) return;
-            if (pos.fen !== relayLastFen) {
-                relayLastFen = pos.fen;
+            let moves = SITE === 'chesscom' ? readMovesCC() : [];
+            // Publish when FEN or move count changes
+            let key = pos.fen + '|' + moves.length;
+            if (key !== relayLastFen) {
+                relayLastFen = key;
                 relayEndSent = false;
                 let players = readPlayers(pos.flipped);
-                publish({ v: 1, type: 'pos', fen: pos.fen, moves: [], white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+                publish({ v: 1, type: 'pos', fen: pos.fen, moves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
             }
             if (isGameOver() && !relayEndSent) {
                 relayEndSent = true;
@@ -641,7 +661,7 @@
             // Ctrl+Shift+C — copy the relay session ID (no persistent UI)
             if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c') {
                 e.preventDefault();
-                if (navigator.clipboard) navigator.clipboard.writeText(sessionId).catch(() => {});
+                if (navigator.clipboard) navigator.clipboard.writeText(sessionId).catch(() => { });
                 document.getElementById('sa-toast')?.remove();
                 document.body.insertAdjacentHTML('beforeend', `<div id="sa-toast" style="position:fixed;bottom:12px;right:12px;z-index:99999;background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 12px;font:12px sans-serif;">Relay ID copied: <b style="font-family:monospace">${sessionId}</b></div>`);
                 setTimeout(() => document.getElementById('sa-toast')?.remove(), 1600);
