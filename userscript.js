@@ -168,6 +168,12 @@
         let size = b.getBoundingClientRect().width / 8;
         if (!size) return null;
 
+        // Drag state is temporary; while a piece is in flight, lichess board
+        // transforms do not reflect the settled position yet.
+        if (b.querySelector('piece.ghost') ||
+            b.querySelector('piece.dragging') ||
+            b.querySelector('piece.anim')) return null;
+
         const TYPES = { pawn: 'p', knight: 'n', bishop: 'b', rook: 'r', queen: 'q', king: 'k' };
         let sqOf = (el) => {
             let m = (el.style.transform || '').match(/translate\((-?[\d.]+)px(?:,\s*(-?[\d.]+)px)?\)/);
