@@ -203,6 +203,7 @@
         // ------------------------------------------------------------ score badge
 
         function setScore(whiteCp, whiteMate, flip) {
+            if (!iv) return; // analyzer stopped — never rewrite the button
             let btn = document.getElementById("sa-btn");
             if (!btn) return;
             let uScore = whiteMate !== null ? (flip ? -whiteMate : whiteMate) : (flip ? -whiteCp : whiteCp);
@@ -351,14 +352,14 @@
             pump();
         }
 
-        function stopEngine() {
-            clearTimeout(bootTimer);
-            engine?.terminate();
-            engine = null;
-            engineReady = false;
-            searching = false;
-            ignoreInfo = false;
+        // Halt the current search but KEEP the worker alive — terminating it
+        // would force a re-download/recompile of the 113MB engine on restart
+        function haltSearch() {
             pendingFen = null;
+            if (engine && engineReady && searching) {
+                ignoreInfo = true;
+                engine.postMessage("stop");
+            }
         }
 
         // lichess primary: instant, ultra-deep cached cloud evaluations (white POV);
@@ -392,13 +393,16 @@
             if (iv) {
                 clearInterval(iv);
                 iv = null;
-                stopEngine();
+                cloudSeq++; // drop in-flight cloud evals
+                haltSearch();
                 document.getElementById("sa-arrows")?.remove();
                 btn.innerHTML = "Start Analyzer (Hotkey: A)";
                 return;
             }
 
-            btn.innerHTML = "Stop Analyzer";
+            btn.innerHTML = (engine && !engineReady && !engineFailed)
+                ? "Loading engine… (one-time ~113MB)"
+                : "Stop Analyzer";
             moves = []; ponder = "";
             let fen = "", stableFen = "", stableFrames = 0;
 
