@@ -1,12 +1,15 @@
     // ==UserScript==
     // @name         Chess Analyzer
     // @namespace    http://tampermonkey.net/
-    // @version      2.1
+    // @version      2.2
     // @description  Chess analyzer with full Stockfish 18 NNUE, lichess support, and web-app relay
     // @author       Peenjeee
     // @match        https://www.chess.com/*
     // @match        https://lichess.org/*
-    // @grant        none
+    // @grant        GM_xmlhttpRequest
+    // @grant        GM.xmlHttpRequest
+    // @connect      chess.0xpnj.dev
+    // @connect      ntfy.sh
     // ==/UserScript==
 
     (function() {
@@ -26,6 +29,75 @@
         const NTFY = 'https://ntfy.sh';
         const RELAY_PREFIX = 'chessweb-';
         const RELAY_KEY = 'chessweb-relay-id';
+
+        // ---------------------------------------------------- CSP-safe transport
+        // lichess's connect-src blocks page-context fetches to our hosts. Route
+        // around it: Tampermonkey grants GM_xmlhttpRequest; the extension's
+        // isolated world is exempt, so plain fetch already works there.
+        const hasGM = typeof GM_xmlhttpRequest === 'function'
+            || (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function');
+
+        function gmRequest(opts) {
+            return new Promise((resolve, reject) => {
+                let api = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : GM.xmlHttpRequest;
+                api({
+                    method: opts.method || 'GET',
+                    url: opts.url,
+                    data: opts.data,
+                    responseType: opts.responseType,
+                    onload: r => (r.status >= 200 && r.status < 300) ? resolve(r.response) : reject(new Error('HTTP ' + r.status)),
+                    onerror: () => reject(new Error('network error')),
+                    ontimeout: () => reject(new Error('timeout'))
+                });
+            });
+        }
+
+        async function fetchText(url) {
+            try {
+                let r = await fetch(url);
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return await r.text();
+            } catch (e) {
+                if (hasGM) return gmRequest({ url });
+                throw e;
+            }
+        }
+
+        async function fetchBytes(url) {
+            try {
+                let r = await fetch(url);
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return await r.arrayBuffer();
+            } catch (e) {
+                if (hasGM) return gmRequest({ url, responseType: 'arraybuffer' });
+                throw e;
+            }
+        }
+
+        // IndexedDB cache so the 113MB wasm downloads once per site, not per page
+        function idbStore(mode, fn) {
+            return new Promise(resolve => {
+                try {
+                    let open = indexedDB.open('sa-engine', 1);
+                    open.onupgradeneeded = () => open.result.createObjectStore('files');
+                    open.onsuccess = () => {
+                        let tx = open.result.transaction('files', mode);
+                        tx.onerror = () => resolve(null);
+                        fn(tx.objectStore('files'), resolve);
+                    };
+                    open.onerror = () => resolve(null);
+                } catch (e) { resolve(null); }
+            });
+        }
+        let idbGetWasm = () => idbStore('readonly', (st, done) => {
+            let g = st.get('sf18-wasm');
+            g.onsuccess = () => done(g.result || null);
+            g.onerror = () => done(null);
+        });
+        let idbPutWasm = (buf) => idbStore('readwrite', (st, done) => {
+            st.put(buf, 'sf18-wasm');
+            st.transaction.oncomplete = () => done(true);
+        });
 
         let iv = null;                 // analyzer loop interval
         let moves = [], ponder = "";
@@ -236,9 +308,20 @@
         let usingFallback = false;
 
         async function createRemoteWorker() {
-            let src = await (await fetch(REMOTE_JS)).text();
+            let src = await fetchText(REMOTE_JS);
             let blobUrl = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
-            return new Worker(blobUrl + "#" + REMOTE_WASM);
+            let wasmRef = REMOTE_WASM;
+            if (SITE === 'lichess') {
+                // the worker inherits the page CSP, which blocks its cross-origin
+                // wasm fetch on lichess — hand it the bytes as a blob URL instead
+                let bytes = await idbGetWasm();
+                if (!bytes) {
+                    bytes = await fetchBytes(REMOTE_WASM);
+                    await idbPutWasm(bytes);
+                }
+                wasmRef = URL.createObjectURL(new Blob([bytes], { type: "application/wasm" }));
+            }
+            return new Worker(blobUrl + "#" + wasmRef);
         }
 
         function wireEngine(w) {
@@ -294,7 +377,11 @@
                 } else {
                     engineFailed = true;
                     let btn = document.getElementById("sa-btn");
-                    if (btn && iv) btn.innerHTML = "Engine unavailable";
+                    if (btn && iv) {
+                        // on lichess the cloud evals keep working — keep the button alive
+                        if (SITE === 'chesscom') btn.innerHTML = "Engine unavailable";
+                        else if (btn.textContent.includes("Loading engine")) btn.innerHTML = "Stop Analyzer";
+                    }
                 }
             };
         }
@@ -322,7 +409,10 @@
                     startWorker(new Worker(CC_FALLBACK), 20000);
                 } else {
                     engineFailed = true;
-                    if (btn && iv) btn.innerHTML = "Engine unavailable";
+                    if (btn && iv) {
+                        if (SITE === 'chesscom') btn.innerHTML = "Engine unavailable";
+                        else if (btn.textContent.includes("Loading engine")) btn.innerHTML = "Stop Analyzer";
+                    }
                 }
             }
         }
@@ -384,7 +474,16 @@
                     return;
                 }
             } catch (e) { /* fall through to the worker */ }
-            if (seq === cloudSeq) analyzeWorker(fen, flip);
+            if (seq !== cloudSeq) return;
+            if (SITE === 'lichess' && engineFailed) {
+                // no cloud entry and no local engine: drop stale arrows, dim the score
+                moves = []; ponder = "";
+                render(flip);
+                let span = document.querySelector('#sa-btn span');
+                if (span) { span.style.background = '#6b7280'; span.textContent = '—'; }
+                return;
+            }
+            analyzeWorker(fen, flip);
         }
 
         // --------------------------------------------------------------- analyzer
@@ -474,17 +573,20 @@
 
         function publish(payload) {
             if (relayBlocked) return;
-            try {
-                fetch(NTFY + '/' + RELAY_PREFIX + sessionId, { method: 'POST', body: JSON.stringify(payload) })
-                    .then(() => { relayEverOk = true; })
-                    .catch(() => {
-                        // lichess's CSP blocks cross-origin fetches for page-context
-                        // userscripts; the extension's isolated world is unaffected
-                        if (SITE === 'lichess' && !relayEverOk) markRelayBlocked();
-                    });
-            } catch (e) {
-                if (SITE === 'lichess' && !relayEverOk) markRelayBlocked();
-            }
+            let url = NTFY + '/' + RELAY_PREFIX + sessionId;
+            let body = JSON.stringify(payload);
+            fetch(url, { method: 'POST', body })
+                .then(() => { relayEverOk = true; })
+                .catch(() => {
+                    // page CSP (lichess) — retry through the GM transport
+                    if (hasGM) {
+                        gmRequest({ method: 'POST', url, data: body })
+                            .then(() => { relayEverOk = true; })
+                            .catch(() => { if (SITE === 'lichess' && !relayEverOk) markRelayBlocked(); });
+                    } else if (SITE === 'lichess' && !relayEverOk) {
+                        markRelayBlocked();
+                    }
+                });
         }
 
         function relayTick() {
