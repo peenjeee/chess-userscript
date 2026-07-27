@@ -441,8 +441,6 @@
 
     function markRelayBlocked() {
         relayBlocked = true;
-        let badge = document.getElementById('chessweb-relay-badge');
-        if (badge) badge.innerHTML = '<span style="opacity:.7">Relay unavailable on this page</span>';
     }
 
     function readPlayers(flipped) {
@@ -516,19 +514,6 @@
                 document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
             }
         }
-        // Relay badge
-        if (!document.getElementById('chessweb-relay-badge') && document.body && readBoard()) {
-            let el = document.createElement('div');
-            el.id = 'chessweb-relay-badge';
-            el.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:99999;background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 10px;font:12px/1.4 sans-serif;display:flex;gap:8px;align-items:center;';
-            el.innerHTML = '<span style="width:8px;height:8px;border-radius:50%;background:#fa412d"></span>'
-                + '<span>Relay ID: <b style="font-family:monospace">' + sessionId + '</b></span>'
-                + '<button id="chessweb-relay-copy" style="background:#3d3b38;color:#e0e0e0;border:0;border-radius:4px;padding:2px 8px;cursor:pointer">Copy</button>';
-            document.body.appendChild(el);
-            document.getElementById('chessweb-relay-copy').onclick = () => {
-                if (navigator.clipboard) navigator.clipboard.writeText(sessionId);
-            };
-        }
     }
 
     setInterval(() => {
@@ -537,15 +522,28 @@
     }, 1500);
 
     document.addEventListener('keydown', e => {
-        if (e.key.toLowerCase() === 'a' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+
+        // Ctrl+Shift+C — copy the relay session ID (no persistent UI)
+        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            if (navigator.clipboard) navigator.clipboard.writeText(sessionId).catch(() => {});
+            document.getElementById('sa-toast')?.remove();
+            document.body.insertAdjacentHTML('beforeend', `<div id="sa-toast" style="position:fixed;bottom:12px;right:12px;z-index:99999;background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 12px;font:12px sans-serif;">Relay ID copied: <b style="font-family:monospace">${sessionId}</b></div>`);
+            setTimeout(() => document.getElementById('sa-toast')?.remove(), 1600);
+            return;
+        }
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        // A — show/hide the move suggestions (starts/stops the analyzer)
+        if (e.key.toLowerCase() === 'a') {
             let btn = document.getElementById("sa-btn");
             if (btn) btn.click();
         }
+        // Insert — hide/show the Analyze button
         if (e.key === 'Insert') {
-            for (let id of ["sa-wrap", "chessweb-relay-badge"]) {
-                let el = document.getElementById(id);
-                if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
-            }
+            let el = document.getElementById("sa-wrap");
+            if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
         }
     });
 

@@ -22,9 +22,11 @@ One script, three features, two sites (**chess.com** and **lichess.org**):
 
 ## Hotkeys
 
-- **A** — Start or stop the analyzer.
-- **Insert** — Hide or show the analyzer button and the relay badge. Useful for
-  keeping the interface clean; the **'A'** hotkey still works while hidden.
+- **A** — Show or hide the move suggestions (starts/stops the analyzer).
+- **Insert** — Hide or show the Analyze button. Useful for keeping the
+  interface clean; the **'A'** hotkey still works while the button is hidden.
+- **Ctrl+Shift+C** — Copy your Relay ID to the clipboard (a small toast
+  confirms and shows the ID). There is no persistent relay UI.
 
 ## Engine
 
@@ -39,10 +41,11 @@ One script, three features, two sites (**chess.com** and **lichess.org**):
 
 ## Live relay (watch from another device)
 
-1. Open any game — a badge appears bottom-right showing **Relay ID: xxxxxxxx**
-   (press **Copy**). The ID stays the same on this browser.
+1. On the game page press **Ctrl+Shift+C** — your **Relay ID** is copied to
+   the clipboard (a small toast shows it). The ID stays the same on this
+   browser.
 2. In the [Chess Analyzer web app](https://chess.0xpnj.dev): **Live** tab →
-   **Session ID** → enter the ID → **Connect Session**.
+   **Session ID** → paste the ID → **Connect Session**.
 3. Every move appears on the web app's board within ~2 seconds with engine
    suggestions; when the game ends, a full Game Review starts automatically.
 
@@ -55,10 +58,10 @@ page. Anyone who knows the random ID could read them, so treat the ID like a
 private link.
 
 **Relay on lichess:** lichess's page security policy blocks the relay when the
-script runs as a userscript — the badge then shows *"Relay unavailable on this
-page"*. Use the **extension version** (its isolated world is not affected —
-verified working), or simply use the web app's **Live → lichess username**
-watch, which needs no relay at all.
+script runs as a userscript, so nothing is sent there. Use the **extension
+version** (its isolated world is not affected — verified working), or simply
+use the web app's **Live → lichess username** watch, which needs no relay at
+all.
 
 ## Troubleshooting
 
