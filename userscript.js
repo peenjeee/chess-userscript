@@ -800,7 +800,7 @@
     }, 1500);
 
     window.addEventListener('keydown', e => {
-        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c') {
+        if (e.ctrlKey && e.shiftKey && ['c', 'x'].includes(e.key.toLowerCase())) {
             e.preventDefault();
             if (navigator.clipboard) navigator.clipboard.writeText(sessionId).catch(() => {});
             document.getElementById('sa-toast')?.remove();

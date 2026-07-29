@@ -25,7 +25,7 @@ One script, three features, two sites (**chess.com** and **lichess.org**):
 - **A** — Show or hide the move suggestions (starts/stops the analyzer).
 - **Insert** — Hide or show the Analyze button. Useful for keeping the
   interface clean; the **'A'** hotkey still works while the button is hidden.
-- **Ctrl+Shift+C** — Copy your Relay ID to the clipboard (a small toast
+- **Ctrl+Shift+C** or **Ctrl+Shift+X** — Copy your Relay ID to the clipboard (a small toast
   confirms and shows the ID). There is no persistent relay UI.
 
 ## Engine
@@ -45,7 +45,7 @@ One script, three features, two sites (**chess.com** and **lichess.org**):
 
 ## Live relay (watch from another device)
 
-1. On the game page press **Ctrl+Shift+C** — your **Relay ID** is copied to
+1. On the game page press **Ctrl+Shift+C** or **Ctrl+Shift+X** — your **Relay ID** is copied to
    the clipboard (a small toast shows it). The ID stays the same on this
    browser.
 2. In the [Chess Analyzer web app](https://chess.0xpnj.dev): **Live** tab →
