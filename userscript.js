@@ -482,6 +482,8 @@
     }
     let relayLastFen = "";
     let relayLastMoves = "";
+    let relayMoveHistory = [];
+    let relayGamePath = location.pathname;
     let relayEndSent = false;
     let relayBoard = null;
     let relayQueued = false;
@@ -685,8 +687,23 @@
         }
     }
 
+    function keepFullRelayHistory(playedMoves) {
+        let gamePath = location.pathname;
+        if (gamePath !== relayGamePath || (relayEndSent && !isGameOver() && playedMoves.length <= 2)) {
+            relayGamePath = gamePath;
+            relayMoveHistory = [];
+        }
+
+        let isPrefix = playedMoves.every((move, index) => move === relayMoveHistory[index]);
+        if (!isPrefix || playedMoves.length > relayMoveHistory.length) {
+            relayMoveHistory = playedMoves;
+        }
+        return relayMoveHistory;
+    }
+
     function publishRelayPosition(pos, force = false) {
         let playedMoves = SITE === 'chesscom' ? readMovesCC() : [];
+        if (SITE === 'chesscom') playedMoves = keepFullRelayHistory(playedMoves);
         let movesKey = playedMoves.join(' ');
         if (!force && pos.fen === relayLastFen && movesKey === relayLastMoves) return false;
 
