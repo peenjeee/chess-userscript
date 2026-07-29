@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.4
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
 // @match        https://lichess.org/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
+// @connect      localhost
 // @connect      chess.0xpnj.dev
 // ==/UserScript==
 
@@ -24,9 +25,10 @@
     const CC_FALLBACK = "/bundles/app/js/vendor/jschessengine/stockfish.asm.1abfa10c.js";
     const CLOUD_EVAL = "https://lichess.org/api/cloud-eval";
 
-    // Relay (mirrors the game to the Chess Analyzer web app via ntfy.sh)
-    const NTFY = 'https://ntfy.sh';
-    const RELAY_PREFIX = 'chessweb-';
+    // Relay (mirrors the game to the Chess Analyzer web app via its SSE API)
+    const RELAY_URLS = location.hostname === 'localhost'
+        ? ['http://localhost:5173/api/relay/']
+        : ['https://chess.0xpnj.dev/api/relay/'];
     const RELAY_KEY = 'chessweb-relay-id';
 
     const hasGM = typeof GM_xmlhttpRequest === 'function'
@@ -39,6 +41,7 @@
                 method: opts.method || 'GET',
                 url: opts.url,
                 data: opts.data,
+                headers: opts.headers,
                 responseType: opts.responseType,
                 onload: r => (r.status >= 200 && r.status < 300) ? resolve(r.response) : reject(new Error('HTTP ' + r.status)),
                 onerror: () => reject(new Error('network error')),
@@ -453,7 +456,7 @@
 
         btn.innerHTML = "Stop Analyzer";
         moves = []; ponder = "";
-        let fen = "", stableFen = "", stableFrames = 0;
+        let fen = "";
 
         iv = setInterval(() => {
             let pos = readBoard();
@@ -462,19 +465,10 @@
 
             if (pos.fen === fen) return;
 
-            if (pos.fen !== stableFen) {
-                stableFen = pos.fen;
-                stableFrames = 0;
-                moves = []; ponder = "";
-                render(pos.flipped);
-                return;
-            }
-
-            stableFrames++;
-            if (stableFrames === 4) {
-                fen = pos.fen;
-                analyzeWorker(fen, pos.flipped);
-            }
+            fen = pos.fen;
+            moves = []; ponder = "";
+            render(pos.flipped);
+            analyzeWorker(fen, pos.flipped);
         }, 30);
     }
 
@@ -488,14 +482,9 @@
     }
     let relayLastFen = "";
     let relayEndSent = false;
-    let relayEverOk = false;
-        let relayBlocked = false;
-
-    function markRelayBlocked() {
-        relayBlocked = true;
-        let badge = document.getElementById('chessweb-relay-badge');
-        if (badge) badge.innerHTML = '<span style="opacity:.7">Relay unavailable on this page</span>';
-    }
+    let relayBoard = null;
+    let relayFrame = 0;
+    const relayBoardObserver = new MutationObserver(queueRelayTick);
 
     function readPlayers(flipped) {
         let t = sel => document.querySelector(sel)?.textContent?.trim() || "";
@@ -522,35 +511,220 @@
         return !!document.querySelector('.result-wrap, .round__app .status');
     }
 
-    function publish(payload) {
-        if (relayBlocked) return;
+    function readMovesCC() {
+        const FIG = {
+            '\u2659':'', '\u265f':'',
+            '\u2658':'N','\u265e':'N',
+            '\u2657':'B','\u265d':'B',
+            '\u2656':'R','\u265c':'R',
+            '\u2655':'Q','\u265b':'Q',
+            '\u2654':'K','\u265a':'K'
+        };
+        const SAN_RE = /^(?:O-O(?:-O)?|[NBRQK][a-h]?[1-8]?x?[a-h][1-8]|[a-h]x[a-h][1-8]|[a-h][1-8])(?:=[NBRQ])?[+#]?$/;
+
+        function cleanSAN(tok) {
+            return (tok || '')
+                .replace(/[\u2654-\u265f]/g, c => FIG[c] ?? '')
+                .replace(/0-0-0/gi, 'O-O-O')
+                .replace(/0-0/gi,   'O-O')
+                .replace(/[!?]+$/, '')
+                .trim();
+        }
+        function isSAN(s) { return s && SAN_RE.test(s); }
+        function nodesToMoves(nodes) {
+            let arr = [];
+            for (let n of nodes) {
+                let s = cleanSAN(n.textContent || '');
+                if (isSAN(s)) arr.push(s);
+            }
+            return arr;
+        }
+
+        // ── Strategy 1: JS property on wc-chess-board element ───────────────────
+        // chess.com attaches its game object directly to the DOM element.
+        // This is the most reliable approach and doesn't depend on DOM structure.
         try {
-            fetch(NTFY + '/' + RELAY_PREFIX + sessionId, { method: 'POST', body: JSON.stringify(payload) })
-                .then(() => { relayEverOk = true; })
-                .catch(() => {
-                    // lichess's CSP blocks cross-origin fetches for page-context
-                    // userscripts; the extension's isolated world is unaffected
-                    if (SITE === 'lichess' && !relayEverOk) markRelayBlocked();
-                });
-        } catch (e) {
-            if (SITE === 'lichess' && !relayEverOk) markRelayBlocked();
+            let b = document.querySelector('.board-layout-main wc-chess-board') ||
+                    document.querySelector('wc-chess-board');
+            if (b) {
+                let game = b.game || b._game;
+                if (game) {
+                    // chess.js-style history(), returns SAN array
+                    if (typeof game.history === 'function') {
+                        let h = game.history();
+                        if (Array.isArray(h) && h.length > 0) {
+                            console.log('[relay] moves via game.history():', h.length);
+                            return h.slice(-256);
+                        }
+                    }
+                    // Some versions expose moves as a list of objects
+                    let rawMoves = game.moves || game.moveList || game.getMoves?.();
+                    if (Array.isArray(rawMoves) && rawMoves.length > 0) {
+                        let moves = rawMoves
+                            .map(m => typeof m === 'string' ? cleanSAN(m) : cleanSAN(m.san || m.notation || ''))
+                            .filter(isSAN);
+                        if (moves.length > 0) {
+                            console.log('[relay] moves via game.moves:', moves.length);
+                            return moves.slice(-256);
+                        }
+                    }
+                }
+            }
+        } catch(e) {}
+
+        // ── Strategy 2: document-level querySelectorAll ──────────────────────────
+        // Works for light DOM — tries specific chess.com class names.
+        const docSelectors = [
+            '.node-highlight-content',          // chess.com 2023+ move text
+            '.move-text-component',             // older chess.com
+            '[data-node-id] .move-text',
+            '[data-node-id] span',
+            'move .node-highlight-content',
+            '.main-line-moves .node span',
+            '.moves-list .node span',
+            '.move-node .move-text'
+        ];
+        for (let sel of docSelectors) {
+            let nodes = document.querySelectorAll(sel);
+            if (!nodes.length) continue;
+            let moves = nodesToMoves(nodes);
+            if (moves.length > 0) {
+                console.log('[relay] moves via doc sel "' + sel + '":', moves.length);
+                return moves.slice(-256);
+            }
+        }
+
+        // ── Strategy 3: Move list container (light DOM + shadow DOM) ─────────────
+        let root = document.querySelector(
+            '.vertical-move-list-component,' +
+            '.horizontal-move-list-component,' +
+            '.move-list-component,' +
+            '[class*="move-list"],' +
+            'wc-chess-move-list'
+        );
+        if (!root) {
+            console.log('[relay] no move list root found');
+            return [];
+        }
+
+        // Try shadow root first, then light DOM
+        let roots = [root.shadowRoot, root].filter(Boolean);
+        for (let sr of roots) {
+            // Try individual nodes inside this root
+            for (let sel of docSelectors) {
+                let nodes = sr.querySelectorAll(sel);
+                if (!nodes.length) continue;
+                let moves = nodesToMoves(nodes);
+                if (moves.length > 0) {
+                    console.log('[relay] moves via sr sel "' + sel + '":', moves.length);
+                    return moves.slice(-256);
+                }
+            }
+
+            // ── Strategy 4: full text scraping of container ───────────────────────
+            let text = (sr.innerText || sr.textContent || '')
+                .replace(/[\u2654-\u265f]/g, c => FIG[c] ?? '')
+                .replace(/0-0-0/gi, 'O-O-O')
+                .replace(/0-0/gi,   'O-O')
+                .replace(/\u00a0/g, ' ')
+                .replace(/[\r\n]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!text) continue;
+
+            let moves = [];
+            let tokens = text
+                .replace(/\d+\.(\.\.)?\s*/g, ' ')
+                .split(/\s+/)
+                .map(t => t.trim())
+                .filter(Boolean);
+
+            for (let tok of tokens) {
+                if (/^(White|Black|moves?|move|analysis|review|live|Draw|Resign)$/i.test(tok)) continue;
+                if (/^(1-0|0-1|1\/2-1\/2|\*)$/.test(tok)) continue;
+                if (/^\d+$/.test(tok)) continue;
+                if (/^\.+$/.test(tok)) continue;
+                let s = cleanSAN(tok);
+                if (isSAN(s)) moves.push(s);
+            }
+            if (moves.length > 0) {
+                console.log('[relay] moves via text scrape, len:', (sr === root.shadowRoot ? 'shadow' : 'light'), moves.length);
+                return moves.slice(-256);
+            }
+        }
+
+        console.log('[relay] readMovesCC: no moves found. root tag:', root.tagName,
+            'shadowRoot:', !!root.shadowRoot,
+            'innerText len:', root.innerText?.length,
+            'textContent len:', root.textContent?.length);
+        return [];
+    }
+
+    function publish(payload) {
+        let body = JSON.stringify(payload);
+        for (let base of RELAY_URLS) {
+            if (hasGM) {
+                gmRequest({
+                    method: 'POST',
+                    url: base + sessionId,
+                    data: body,
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
+                }).catch(err => console.warn('relay publish failed', base, err));
+            } else {
+                fetch(base + sessionId, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body
+                }).catch(err => console.warn('relay publish failed', base, err));
+            }
         }
     }
 
     function relayTick() {
-        let pos = readBoard();
-        if (!pos) return;
-        if (pos.fen !== relayLastFen) {
-            relayLastFen = pos.fen;
-            relayEndSent = false;
-            let players = readPlayers(pos.flipped);
-            publish({ v: 1, type: 'pos', fen: pos.fen, moves: [], white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
-        }
-        if (isGameOver() && !relayEndSent) {
-            relayEndSent = true;
-            publish({ v: 1, type: 'end', ts: Date.now() });
+        try {
+            let pos = readBoard();
+            if (!pos) return;
+
+            if (pos.board !== relayBoard) {
+                relayBoardObserver.disconnect();
+                relayBoard = pos.board;
+                relayBoardObserver.observe(relayBoard, {
+                    attributes: true,
+                    childList: true,
+                    subtree: true,
+                    attributeFilter: ['class', 'style']
+                });
+            }
+
+            if (pos.fen !== relayLastFen) {
+                relayLastFen = pos.fen;
+                relayEndSent = false;
+                let moves = SITE === 'chesscom' ? readMovesCC() : [];
+                let players = readPlayers(pos.flipped);
+                publish({ v: 1, type: 'pos', fen: pos.fen, moves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+            }
+            if (isGameOver() && !relayEndSent) {
+                relayEndSent = true;
+                publish({ v: 1, type: 'end', ts: Date.now() });
+            }
+        } catch (err) {
+            console.warn('relay tick failed', err);
         }
     }
+
+    function queueRelayTick() {
+        if (relayFrame) return;
+        relayFrame = requestAnimationFrame(() => {
+            relayFrame = 0;
+            relayTick();
+        });
+    }
+
+    new MutationObserver(queueRelayTick).observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+    queueRelayTick();
 
     // --------------------------------------------------------------------- ui
 
@@ -568,27 +742,22 @@
                 document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
             }
         }
-        // Relay badge
-        if (!document.getElementById('chessweb-relay-badge') && document.body && readBoard()) {
-            let el = document.createElement('div');
-            el.id = 'chessweb-relay-badge';
-            el.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:99999;background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 10px;font:12px/1.4 sans-serif;display:flex;gap:8px;align-items:center;';
-            el.innerHTML = '<span style="width:8px;height:8px;border-radius:50%;background:#fa412d"></span>'
-                + '<span>Relay ID: <b style="font-family:monospace">' + sessionId + '</b></span>'
-                + '<button id="chessweb-relay-copy" style="background:#3d3b38;color:#e0e0e0;border:0;border-radius:4px;padding:2px 8px;cursor:pointer">Copy</button>';
-            document.body.appendChild(el);
-            document.getElementById('chessweb-relay-copy').onclick = () => {
-                if (navigator.clipboard) navigator.clipboard.writeText(sessionId);
-            };
-        }
     }
 
     setInterval(() => {
         mountUI();
-        relayTick();
+        queueRelayTick();
     }, 1500);
 
     document.addEventListener('keydown', e => {
+        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            if (navigator.clipboard) navigator.clipboard.writeText(sessionId).catch(() => {});
+            document.getElementById('sa-toast')?.remove();
+            document.body.insertAdjacentHTML('beforeend', `<div id="sa-toast" style="position:fixed;bottom:12px;right:12px;z-index:99999;background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 12px;font:12px sans-serif;">Relay ID copied: <b style="font-family:monospace">${sessionId}</b></div>`);
+            setTimeout(() => document.getElementById('sa-toast')?.remove(), 1600);
+            return;
+        }
         if (e.key.toLowerCase() === 'a' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
             let btn = document.getElementById("sa-btn");
             if (btn) btn.click();
