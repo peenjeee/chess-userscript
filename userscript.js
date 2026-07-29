@@ -749,7 +749,7 @@
         queueRelayTick();
     }, 1500);
 
-    document.addEventListener('keydown', e => {
+    window.addEventListener('keydown', e => {
         if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c') {
             e.preventDefault();
             if (navigator.clipboard) navigator.clipboard.writeText(sessionId).catch(() => {});
@@ -758,16 +758,23 @@
             setTimeout(() => document.getElementById('sa-toast')?.remove(), 1600);
             return;
         }
-        if (e.key.toLowerCase() === 'a' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        if (e.repeat || e.target.isContentEditable || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+        if (e.key.toLowerCase() === 'a') {
             let btn = document.getElementById("sa-btn");
-            if (btn) btn.click();
+            if (btn) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                btn.click();
+            }
         }
         if (e.key === 'Insert') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
             for (let id of ["sa-wrap", "chessweb-relay-badge"]) {
                 let el = document.getElementById(id);
                 if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
             }
         }
-    });
+    }, true);
 
 })();
