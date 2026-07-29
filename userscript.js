@@ -481,6 +481,7 @@
         localStorage.setItem(RELAY_KEY, sessionId);
     }
     let relayLastFen = "";
+    let relayLastMoves = "";
     let relayEndSent = false;
     let relayBoard = null;
     let relayFrame = 0;
@@ -527,15 +528,26 @@
                 .replace(/[\u2654-\u265f]/g, c => FIG[c] ?? '')
                 .replace(/0-0-0/gi, 'O-O-O')
                 .replace(/0-0/gi,   'O-O')
+                .replace(/^\d+\.(?:\.\.)?/, '')
                 .replace(/[!?]+$/, '')
                 .trim();
         }
         function isSAN(s) { return s && SAN_RE.test(s); }
+        function textToMoves(text) {
+            return String(text || '')
+                .replace(/[\r\n\u00a0]+/g, ' ')
+                .split(/\s+/)
+                .map(cleanSAN)
+                .filter(isSAN);
+        }
         function nodesToMoves(nodes) {
             let arr = [];
             for (let n of nodes) {
-                let s = cleanSAN(n.textContent || '');
-                if (isSAN(s)) arr.push(s);
+                let raw = n.getAttribute?.('data-san') ||
+                    n.getAttribute?.('data-move') ||
+                    n.getAttribute?.('data-notation') ||
+                    n.textContent || '';
+                arr.push(...textToMoves(raw));
             }
             return arr;
         }
@@ -582,7 +594,12 @@
             'move .node-highlight-content',
             '.main-line-moves .node span',
             '.moves-list .node span',
-            '.move-node .move-text'
+            '.move-node .move-text',
+            '[data-test-element*="move-list"] [data-ply]',
+            '[data-ply][data-san]',
+            '[data-ply] .move-san',
+            'wc-simple-move-list [class*="move"]',
+            'wc-chess-move-list [class*="move"]'
         ];
         for (let sel of docSelectors) {
             let nodes = document.querySelectorAll(sel);
@@ -600,6 +617,8 @@
             '.horizontal-move-list-component,' +
             '.move-list-component,' +
             '[class*="move-list"],' +
+            '[data-test-element*="move-list"],' +
+            'wc-simple-move-list,' +
             'wc-chess-move-list'
         );
         if (!root) {
@@ -632,21 +651,7 @@
                 .trim();
             if (!text) continue;
 
-            let moves = [];
-            let tokens = text
-                .replace(/\d+\.(\.\.)?\s*/g, ' ')
-                .split(/\s+/)
-                .map(t => t.trim())
-                .filter(Boolean);
-
-            for (let tok of tokens) {
-                if (/^(White|Black|moves?|move|analysis|review|live|Draw|Resign)$/i.test(tok)) continue;
-                if (/^(1-0|0-1|1\/2-1\/2|\*)$/.test(tok)) continue;
-                if (/^\d+$/.test(tok)) continue;
-                if (/^\.+$/.test(tok)) continue;
-                let s = cleanSAN(tok);
-                if (isSAN(s)) moves.push(s);
-            }
+            let moves = textToMoves(text);
             if (moves.length > 0) {
                 console.log('[relay] moves via text scrape, len:', (sr === root.shadowRoot ? 'shadow' : 'light'), moves.length);
                 return moves.slice(-256);
@@ -680,6 +685,31 @@
         }
     }
 
+    function publishRelayPosition(pos) {
+        let playedMoves = SITE === 'chesscom' ? readMovesCC() : [];
+        let movesKey = playedMoves.join(' ');
+        if (pos.fen === relayLastFen && movesKey === relayLastMoves) return false;
+
+        relayLastFen = pos.fen;
+        relayLastMoves = movesKey;
+        relayEndSent = false;
+        let players = readPlayers(pos.flipped);
+        publish({ v: 1, type: 'pos', fen: pos.fen, moves: playedMoves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+        return true;
+    }
+
+    function refreshRelayMoves(fen) {
+        let pos = readBoard();
+        if (!pos || pos.fen !== fen) return;
+        if (publishRelayPosition(pos) && isGameOver()) sendRelayEnd();
+    }
+
+    function sendRelayEnd() {
+        if (relayEndSent) return;
+        relayEndSent = true;
+        publish({ v: 1, type: 'end', ts: Date.now() });
+    }
+
     function relayTick() {
         try {
             let pos = readBoard();
@@ -696,17 +726,15 @@
                 });
             }
 
-            if (pos.fen !== relayLastFen) {
-                relayLastFen = pos.fen;
-                relayEndSent = false;
-                let moves = SITE === 'chesscom' ? readMovesCC() : [];
-                let players = readPlayers(pos.flipped);
-                publish({ v: 1, type: 'pos', fen: pos.fen, moves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+            let fenChanged = pos.fen !== relayLastFen;
+            if (fenChanged) {
+                publishRelayPosition(pos);
+                if (SITE === 'chesscom') {
+                    requestAnimationFrame(() => refreshRelayMoves(pos.fen));
+                    setTimeout(() => refreshRelayMoves(pos.fen), 100);
+                }
             }
-            if (isGameOver() && !relayEndSent) {
-                relayEndSent = true;
-                publish({ v: 1, type: 'end', ts: Date.now() });
-            }
+            if (isGameOver()) sendRelayEnd();
         } catch (err) {
             console.warn('relay tick failed', err);
         }
