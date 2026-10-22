@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.4
-// @description  Chess analyzer with full Stockfish 18 NNUE, lichess support, and web-app relay
+// @version      2.5
+// @description  Chess analyzer with full Stockfish 18 NNUE, lichess and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
 // @match        https://lichess.org/*
+// @match        https://endgame.ai/*
+// @match        https://www.endgame.ai/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @connect      localhost
@@ -15,7 +17,10 @@
 (function() {
     'use strict';
 
-    const SITE = location.hostname.includes('lichess') ? 'lichess' : 'chesscom';
+    const SITE = location.hostname.includes('lichess') ? 'lichess'
+        : location.hostname.includes('endgame') ? 'endgame'
+        : 'chesscom';
+    const EG_BOARD = '.board-container .board';
 
     // Full-strength Stockfish 18 NNUE hosted on our own site (CORS-open).
     // The loader reads its wasm location from the worker URL hash.
@@ -235,7 +240,56 @@
         };
     }
 
-    let readBoard = SITE === 'lichess' ? readBoardLI : readBoardCC;
+    function readBoardEG() {
+        let b = document.querySelector(EG_BOARD);
+        if (!b) return null;
+        let a1 = b.querySelector('.cell#a1'), h8 = b.querySelector('.cell#h8');
+        if (!a1 || !h8) return null;
+        // Flipping reverses the cell order, so a1 ends up above h8.
+        let flipped = a1.getBoundingClientRect().top < h8.getBoundingClientRect().top;
+
+        let grid = {};
+        let lastColor = null;
+        b.querySelectorAll('.cell').forEach(cell => {
+            let sq = cell.id.match(/^([a-h])([1-8])$/);
+            let p = cell.querySelector('.piece');
+            if (!sq || !p) return;
+            let m = p.className.match(/\bpiece\s+([pnbrqk])([wb])\b/);
+            if (!m) return;
+            grid[('abcdefgh'.indexOf(sq[1]) + 1) + ',' + sq[2]] = m[2] + m[1];
+            if (cell.classList.contains('lastMove')) lastColor = m[2];
+        });
+        if (Object.keys(grid).length < 2) return null;
+
+        if (lastColor === 'w') currentTurn = 'b';
+        else if (lastColor === 'b') currentTurn = 'w';
+
+        let f = "";
+        for (let r = 8; r >= 1; r--) {
+            if (r < 8) f += "/";
+            for (let c = 1; c <= 8; c++) {
+                let pc = grid[c + ',' + r];
+                f += pc ? (pc[0] === 'w' ? pc[1].toUpperCase() : pc[1]) : "1";
+            }
+        }
+        let castling = "";
+        if (grid['5,1'] === 'wk') {
+            if (grid['8,1'] === 'wr') castling += "K";
+            if (grid['1,1'] === 'wr') castling += "Q";
+        }
+        if (grid['5,8'] === 'bk') {
+            if (grid['8,8'] === 'br') castling += "k";
+            if (grid['1,8'] === 'br') castling += "q";
+        }
+
+        return {
+            board: b,
+            flipped,
+            fen: f.replace(/1+/g, m => m.length) + " " + currentTurn + " " + (castling || "-") + " - 0 1"
+        };
+    }
+
+    let readBoard = { lichess: readBoardLI, endgame: readBoardEG, chesscom: readBoardCC }[SITE];
 
     // ----------------------------------------------------------------- arrows
 
@@ -495,6 +549,9 @@
         if (SITE === 'chesscom') {
             bottom = t('.player-bottom [data-test-element="user-tagline-username"]') || t('.player-bottom .cc-user-username-component');
             top = t('.player-top [data-test-element="user-tagline-username"]') || t('.player-top .cc-user-username-component');
+        } else if (SITE === 'endgame') {
+            bottom = t('.widget-bottom-player .gp-username');
+            top = t('.widget-top-player .gp-username');
         } else {
             bottom = (t('.ruser-bottom a.user-link') || t('.ruser-bottom')).split(/\s+/)[0] || "";
             top = (t('.ruser-top a.user-link') || t('.ruser-top')).split(/\s+/)[0] || "";
@@ -511,6 +568,7 @@
         if (SITE === 'chesscom') {
             return !!document.querySelector('.game-over-modal-content, .game-over-header-component, [class*="game-over-modal"]');
         }
+        if (SITE === 'endgame') return !!document.querySelector('.finish-game-overlay');
         return !!document.querySelector('.result-wrap, .round__app .status');
     }
 
@@ -787,7 +845,7 @@
                     host.insertAdjacentHTML('afterbegin', `<div id="sa-wrap" style="display:flex;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;"><button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button></div>`);
                     document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
                 }
-            } else if (document.querySelector('cg-board')) {
+            } else if (document.querySelector(SITE === 'endgame' ? EG_BOARD : 'cg-board')) {
                 document.body.insertAdjacentHTML('beforeend', `<div id="sa-wrap" style="position:fixed;bottom:12px;left:12px;z-index:99999;"><button id="sa-btn" style="background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 14px;font:13px sans-serif;cursor:pointer">Start Analyzer (Hotkey: A)</button></div>`);
                 document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
             }

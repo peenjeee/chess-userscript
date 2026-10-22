@@ -1,6 +1,6 @@
 # Chess Analyzer (userscript)
 
-One script, three features, two sites (**chess.com** and **lichess.org**):
+One script, three features, three sites (**chess.com**, **lichess.org**, and **endgame.ai**):
 
 1. **Analyzer** — draws the top 3 engine move suggestions (plus a dashed ponder
    arrow) directly on the board, with a live score badge.
@@ -42,6 +42,8 @@ One script, three features, two sites (**chess.com** and **lichess.org**):
   (declared in the header — approve the `chess.0xpnj.dev` permission if your
   userscript manager asks) and caches the 113MB in IndexedDB, so it downloads
   once ever, not once per page.
+- On **endgame.ai** the script runs the same Stockfish 18 NNUE build as on
+  chess.com (cached in IndexedDB), with no site-engine fallback.
 
 ## Live relay (watch from another device)
 
