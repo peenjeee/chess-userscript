@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -790,7 +790,9 @@
         relayLastMoves = movesKey;
         relayEndSent = false;
         let players = readPlayers(pos.flipped);
-        publish({ v: 1, type: 'pos', fen: pos.fen, moves: playedMoves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+        // Lets the web app load the finished game from endgame.ai by id
+        let gameId = SITE === 'endgame' ? location.pathname.match(/^\/game\/([\w-]+)/)?.[1] : undefined;
+        publish({ v: 1, type: 'pos', site: SITE, gameId, fen: pos.fen, moves: playedMoves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
         return true;
     }
 
