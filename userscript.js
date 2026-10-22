@@ -240,8 +240,20 @@
         };
     }
 
+    // Other boards (home preview, a previous game) can stay mounted, so pick
+    // the largest one that has rendered its cells.
+    function findBoardEG() {
+        let best = null, bestArea = 0;
+        for (let b of document.querySelectorAll(EG_BOARD)) {
+            if (!b.querySelector('.cell#a1')) continue;
+            let r = b.getBoundingClientRect();
+            if (r.width * r.height > bestArea) { best = b; bestArea = r.width * r.height; }
+        }
+        return best;
+    }
+
     function readBoardEG() {
-        let b = document.querySelector(EG_BOARD);
+        let b = findBoardEG();
         if (!b) return null;
         let a1 = b.querySelector('.cell#a1'), h8 = b.querySelector('.cell#h8');
         if (!a1 || !h8) return null;
@@ -259,7 +271,9 @@
             grid[('abcdefgh'.indexOf(sq[1]) + 1) + ',' + sq[2]] = m[2] + m[1];
             if (cell.classList.contains('lastMove')) lastColor = m[2];
         });
-        if (Object.keys(grid).length < 2) return null;
+        // A half-rendered board without both kings would crash the engine.
+        let pieces = Object.values(grid);
+        if (pieces.filter(p => p === 'wk').length !== 1 || pieces.filter(p => p === 'bk').length !== 1) return null;
 
         if (lastColor === 'w') currentTurn = 'b';
         else if (lastColor === 'b') currentTurn = 'w';
@@ -845,7 +859,7 @@
                     host.insertAdjacentHTML('afterbegin', `<div id="sa-wrap" style="display:flex;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;"><button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button></div>`);
                     document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
                 }
-            } else if (document.querySelector(SITE === 'endgame' ? EG_BOARD : 'cg-board')) {
+            } else if (SITE === 'endgame' ? findBoardEG() : document.querySelector('cg-board')) {
                 document.body.insertAdjacentHTML('beforeend', `<div id="sa-wrap" style="position:fixed;bottom:12px;left:12px;z-index:99999;"><button id="sa-btn" style="background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 14px;font:13px sans-serif;cursor:pointer">Start Analyzer (Hotkey: A)</button></div>`);
                 document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
             }
