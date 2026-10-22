@@ -524,12 +524,19 @@
 
         btn.innerHTML = "Stop Analyzer";
         moves = []; ponder = "";
-        let fen = "";
+        let fen = "", flipped = null;
 
         iv = setInterval(() => {
             let pos = readBoard();
             if (!pos) return;
             ensureOverlay(pos.board);
+
+            // Flipping keeps the FEN, so redraw for the new orientation without restarting the search.
+            if (pos.flipped !== flipped) {
+                flipped = pos.flipped;
+                engineFlip = flipped;
+                render(flipped);
+            }
 
             if (pos.fen === fen) return;
 
