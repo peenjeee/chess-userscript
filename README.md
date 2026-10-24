@@ -74,6 +74,9 @@ which needs no relay at all.
 
 - **Analyzer is stuck or arrows don't appear:** press **'A'** twice (off and
   on again). This resets the engine and resyncs it with the current board.
+- **"Engine unavailable":** the engine failed to load or crashed more than
+  three times in a row (it restarts by itself before that — usually an
+  interrupted 113MB download). Press **'A'** twice to retry from scratch.
 - **No arrows on some lichess positions (score shows "—"):** that position is
   not in the lichess cloud and the local engine could not be loaded — usually
   because the userscript manager denied the `chess.0xpnj.dev` permission.

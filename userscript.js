@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -372,10 +372,16 @@
     // (this Stockfish build crashes otherwise) — stop, await bestmove, go.
 
     let engine = null, engineReady = false, engineFailed = false;
+    let engineStarting = false;    // one start at a time: the load is ~113MB
     let searching = false, ignoreInfo = false, pendingFen = null;
+    let searchTurn = "w";          // side to move in the position being searched
     let engineFlip = false;
-    let bootTimer = null;
+    let bootTimer = null, retryTimer = null;
     let usingFallback = false;
+    // A failed load or a crashed worker is retried a few times before giving up
+    const ENGINE_RETRIES = 3;
+    const ENGINE_RETRY_MS = 3000;
+    let engineRetries = 0;
 
     async function createRemoteWorker() {
         let src = await fetchText(REMOTE_JS);
@@ -391,6 +397,7 @@
 
     function wireEngine(w) {
         w.onmessage = e => {
+            if (engine !== w) return;  // a replaced worker must not touch the arrows
             let str = String(e.data || "");
             if (str === "uciok") {
                 w.postMessage("setoption name MultiPV value 3");
@@ -403,6 +410,7 @@
             if (str === "readyok") {
                 clearTimeout(bootTimer);
                 engineReady = true;
+                engineRetries = 0;
                 let btn = document.getElementById("sa-btn");
                 if (btn && iv && !btn.querySelector('span')) btn.innerHTML = "Stop Analyzer";
                 pump();
@@ -425,7 +433,7 @@
                     let mate = str.match(/score mate (-?\d+)/);
                     let cp = str.match(/score cp (-?\d+)/);
                     // UCI scores are side-to-move POV -> convert to white POV
-                    let sign = currentTurn === 'w' ? 1 : -1;
+                    let sign = searchTurn === 'w' ? 1 : -1;
                     setScore(cp ? +cp[1] * sign : null, mate ? +mate[1] * sign : null, engineFlip);
                 }
                 render(engineFlip);
@@ -433,18 +441,39 @@
         };
         w.onerror = () => {
             w.terminate();
+            if (engine !== w) return;
             engine = null;
             engineReady = false;
             searching = false;
-            if (SITE === 'chesscom' && !usingFallback) {
-                usingFallback = true;
-                startWorker(new Worker(CC_FALLBACK), 20000);
-            } else {
-                engineFailed = true;
-                let btn = document.getElementById("sa-btn");
-                if (btn && iv) btn.innerHTML = "Engine unavailable";
-            }
+            ignoreInfo = false;
+            engineFailedOnce();
         };
+    }
+
+    // Retry a failed load or crashed worker; when retries run out, chess.com
+    // falls back to its own engine once, everywhere else the engine gives up
+    function engineFailedOnce() {
+        clearTimeout(bootTimer);
+        if (!iv) return;
+        if (engineRetries < ENGINE_RETRIES) {
+            engineRetries++;
+            let btn = document.getElementById("sa-btn");
+            if (btn) btn.innerHTML = "Restarting engine…";
+            clearTimeout(retryTimer);
+            retryTimer = setTimeout(ensureEngine, ENGINE_RETRY_MS);
+            return;
+        }
+        if (SITE === 'chesscom' && !usingFallback) {
+            usingFallback = true;
+            engineRetries = 0;
+            // deferred: a failing start is still holding engineStarting here
+            clearTimeout(retryTimer);
+            retryTimer = setTimeout(ensureEngine, 0);
+            return;
+        }
+        engineFailed = true;
+        let btn = document.getElementById("sa-btn");
+        if (btn) btn.innerHTML = "Engine unavailable (press A twice to retry)";
     }
 
     function startWorker(w, bootMs) {
@@ -459,19 +488,18 @@
     }
 
     async function ensureEngine() {
-        if (engine || engineFailed) return;
+        if (engine || engineFailed || engineStarting || !iv) return;
+        engineStarting = true;
         let btn = document.getElementById("sa-btn");
-        if (btn) btn.innerHTML = "Loading engine… (one-time ~113MB)";
+        if (btn && !usingFallback) btn.innerHTML = "Loading engine… (one-time ~113MB)";
         try {
-            startWorker(await createRemoteWorker(), 300000);
+            let w = usingFallback ? new Worker(CC_FALLBACK) : await createRemoteWorker();
+            if (!iv) { w.terminate(); return; }  // analyzer stopped while loading
+            startWorker(w, usingFallback ? 20000 : 300000);
         } catch (e) {
-            if (SITE === 'chesscom' && !usingFallback) {
-                usingFallback = true;
-                startWorker(new Worker(CC_FALLBACK), 20000);
-            } else {
-                engineFailed = true;
-                if (btn && iv) btn.innerHTML = "Engine unavailable";
-            }
+            engineFailedOnce();
+        } finally {
+            engineStarting = false;
         }
     }
 
@@ -489,6 +517,7 @@
         pendingFen = null;
         moves = []; ponder = "";
         searching = true;
+        searchTurn = f.split(' ')[1];
         engine.postMessage("position fen " + f);
         engine.postMessage("go infinite");
     }
@@ -500,14 +529,94 @@
         pump();
     }
 
+    // Nothing valid to analyze: end the current search so stale arrows don't return
+    function idleEngine() {
+        pendingFen = null;
+        if (engine && searching) {
+            ignoreInfo = true;
+            engine.postMessage("stop");
+        }
+    }
+
     function stopEngine() {
         clearTimeout(bootTimer);
+        clearTimeout(retryTimer);
         engine?.terminate();
         engine = null;
         engineReady = false;
         searching = false;
         ignoreInfo = false;
         pendingFen = null;
+    }
+
+    // ------------------------------------------------------- position check
+    // Boards read mid-animation or with a misread turn can be impossible;
+    // the engine answers those with no move, so screen them first.
+
+    function parsePlacement(placement) {
+        let rows = placement.split('/');
+        if (rows.length !== 8) return null;
+        let board = [];
+        for (let row of rows) {
+            let cells = [];
+            for (let ch of row) {
+                if (/\d/.test(ch)) for (let k = 0; k < +ch; k++) cells.push('');
+                else cells.push(ch);
+            }
+            if (cells.length !== 8) return null;
+            board.push(cells);
+        }
+        return board;
+    }
+
+    // Is the square at (row, col) — row 0 is rank 8 — attacked by that color?
+    function attackedBy(board, r, c, white) {
+        let at = (rr, cc) => (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) ? board[rr][cc] : null;
+        let is = (p, type) => !!p && (p === p.toUpperCase()) === white && p.toLowerCase() === type;
+        let pawnRow = white ? r + 1 : r - 1;
+        if (is(at(pawnRow, c - 1), 'p') || is(at(pawnRow, c + 1), 'p')) return true;
+        for (let [dr, dc] of [[1, 2], [2, 1], [-1, 2], [-2, 1], [1, -2], [2, -1], [-1, -2], [-2, -1]]) {
+            if (is(at(r + dr, c + dc), 'n')) return true;
+        }
+        for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+                if ((dr || dc) && is(at(r + dr, c + dc), 'k')) return true;
+            }
+        }
+        for (let [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            let sliders = dr && dc ? 'bq' : 'rq';
+            for (let k = 1; k < 8; k++) {
+                let p = at(r + dr * k, c + dc * k);
+                if (p === null) break;
+                if (!p) continue;
+                if (sliders.split('').some(t => is(p, t))) return true;
+                break;
+            }
+        }
+        return false;
+    }
+
+    // The FEN to analyze, or null when the board cannot be a real position.
+    // Only the side to move can be in check, so a check fixes a misread turn.
+    function playableFen(fen) {
+        let [placement, turn, ...rest] = fen.split(' ');
+        let board = parsePlacement(placement);
+        if (!board) return null;
+        let kings = { K: [], k: [] };
+        for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+                let p = board[r][c];
+                if (p === 'K' || p === 'k') kings[p].push([r, c]);
+                if ((p === 'P' || p === 'p') && (r === 0 || r === 7)) return null;
+            }
+        }
+        if (kings.K.length !== 1 || kings.k.length !== 1) return null;
+        let whiteInCheck = attackedBy(board, kings.K[0][0], kings.K[0][1], false);
+        let blackInCheck = attackedBy(board, kings.k[0][0], kings.k[0][1], true);
+        if (whiteInCheck && blackInCheck) return null;
+        if (whiteInCheck) turn = 'w';
+        else if (blackInCheck) turn = 'b';
+        return [placement, turn, ...rest].join(' ');
     }
 
     // --------------------------------------------------------------- analyzer
@@ -522,6 +631,10 @@
             return;
         }
 
+        // A fresh start retries everything, including an engine that gave up
+        engineFailed = false;
+        usingFallback = false;
+        engineRetries = 0;
         btn.innerHTML = "Stop Analyzer";
         moves = []; ponder = "";
         let fen = "", flipped = null;
@@ -543,7 +656,9 @@
             fen = pos.fen;
             moves = []; ponder = "";
             render(pos.flipped);
-            analyzeWorker(fen, pos.flipped);
+            let playable = playableFen(fen);
+            if (playable) analyzeWorker(playable, pos.flipped);
+            else idleEngine();
         }, 30);
     }
 
