@@ -55,7 +55,6 @@
         wasm: "e9c04dff71870770a515f1d1257aca4d7cebe2915339e9f847aebdc0c8ca74e0"
     };
     const NNUE_URL = "https://lichess1.org/assets/lifat/nnue/";
-    const CLOUD_EVAL = "https://lichess.org/api/cloud-eval";
 
     // Relay (mirrors the game to the Chess Analyzer web app via its SSE API)
     const RELAY_URLS = location.hostname === 'localhost'

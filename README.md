@@ -6,9 +6,7 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
    arrow) directly on the board, with a live score badge.
 2. **Full-strength engine** — Stockfish 18 with the full NNUE network (~113MB,
    downloaded once and cached by the browser), the same engine the
-   [Chess Analyzer web app](https://chess.0xpnj.dev) uses. On lichess the
-   script prefers the instant lichess cloud evaluation (depth 60+) and only
-   falls back to the local engine for positions the cloud doesn't know.
+   [Chess Analyzer web app](https://chess.0xpnj.dev) uses.
 3. **Relay** — mirrors the game you are playing to the web app's **Live** tab
    on any other device via a session ID.
 
@@ -35,13 +33,10 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   *"Loading engine… (one-time ~113MB)"*; after that it starts instantly from
   the browser cache. If the download fails it falls back to chess.com's
   built-in engine.
-- On **lichess** suggestions come from the lichess **cloud evaluation** API
-  (instant, very deep, White/Black handled automatically). Positions the cloud
-  doesn't know (most middlegames of live games) fall back to the **local
-  engine**: the script downloads it through Tampermonkey's `GM_xmlhttpRequest`
-  (declared in the header — approve the `chess.0xpnj.dev` permission if your
-  userscript manager asks) and caches the 113MB in IndexedDB, so it downloads
-  once ever, not once per page.
+- On **lichess** the script runs the same engine: it downloads it through
+  Tampermonkey's `GM_xmlhttpRequest` (declared in the header — approve the
+  `chess.0xpnj.dev` permission if your userscript manager asks) and caches the
+  113MB in IndexedDB, so it downloads once ever, not once per page.
 - **lichess variants** (King of the Hill, Three-Check, Antichess, Atomic,
   Horde, Racing Kings, Crazyhouse) run on Fairy-Stockfish 14 with the
   variant's NNUE network, the engine lichess's own analysis uses
@@ -115,11 +110,10 @@ which needs no relay at all.
 - **"Engine unavailable":** the engine failed to load or crashed more than
   three times in a row (it restarts by itself before that — usually an
   interrupted 113MB download). Press **'A'** twice to retry from scratch.
-- **No arrows on some lichess positions (score shows "—"):** that position is
-  not in the lichess cloud and the local engine could not be loaded — usually
-  because the userscript manager denied the `chess.0xpnj.dev` permission.
-  Grant it (or use the extension version) and the engine takes over for those
-  positions.
+- **"Engine unavailable" on lichess:** the engine could not be loaded,
+  usually because the userscript manager denied the `chess.0xpnj.dev`
+  permission. Grant it (or use the extension version), then press **'A'**
+  twice.
 
 ## Extension version
 
