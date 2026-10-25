@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.6
+// @version      3.7
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -329,9 +329,11 @@
     // one exists (Paradigm has none). On top of the keys above: pieces maps the server's
     // own piece names to FEN letters, walls turns its stones (colour 7) into
     // walls, and setup waits until the setup drops are over. No Castling and
-    // Setup Chess are standard chess for SF18 once the board is read. Any other
+    // Setup Chess are standard chess for SF18 once the board is read, and so is
+    // Chess960, whose castling rights come from its start position. Any other
     // slug, custom rules and four-player boards included, is not supported.
     const CC_VARIANTS = {
+        'chess960': { ...STANDARD, castling: false },
         'crazyhouse': LI_VARIANTS.crazyhouse,
         '3-check': LI_VARIANTS.threeCheck,
         'king-of-the-hill': LI_VARIANTS.kingOfTheHill,
@@ -1310,6 +1312,107 @@ if (globalThis.name !== 'em-pthread') {
         return rights || '-';
     }
 
+    // chess.com's variants server is not in its game API. Its page keeps the
+    // game it shows in the app's Pinia stores, which only the page's own
+    // scripts can reach, so a script put into the page answers each read event
+    // with that game. DOM events reach both sides at once, so a read returns
+    // the game straight away.
+    const CV_READ = 'chess-analyzer-variants-read';
+    const CV_GAME = 'chess-analyzer-variants-game';
+
+    // Runs in the page. Moves without squares (a resignation, a timeout) are left out.
+    function variantsGameReader(readEvent, gameEvent) {
+        document.addEventListener(readEvent, () => {
+            let game = null;
+            try {
+                let stores = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s;
+                let g = stores.get('game');
+                game = {
+                    gameNr: g.gameNr,
+                    startFen: g.startFen,
+                    gameOver: !!g.gameOver,
+                    players: (g.players || []).map(p => (p && p.username) || ''),
+                    moves: (stores.get('moves').moves || [])
+                        .filter(m => m.from && m.to && !m.isIllegal && !(m.inVariation >= 0))
+                        .map(m => [m.from, m.to, m.promoteTo || ''])
+                };
+            } catch (e) {}
+            document.dispatchEvent(new CustomEvent(gameEvent, { detail: JSON.stringify(game) }));
+        });
+    }
+
+    let cvReply = null;
+    if (SITE === 'chesscom' && location.pathname.startsWith('/variants')) {
+        document.addEventListener(CV_GAME, e => { cvReply = e.detail; });
+        try {
+            let s = document.createElement('script');
+            s.textContent = `(${variantsGameReader})(${JSON.stringify(CV_READ)}, ${JSON.stringify(CV_GAME)});`;
+            document.documentElement.appendChild(s);
+            s.remove();
+        } catch (e) {
+            console.warn('variants reader not installed', e);
+        }
+    }
+
+    function readVariantsGame() {
+        cvReply = null;
+        document.dispatchEvent(new CustomEvent(CV_READ));
+        try { return JSON.parse(cvReply); } catch (e) { return null; }
+    }
+
+    // The server writes a two-player game on its four-player 14x14 grid: rows
+    // from the top, cells split by commas (x off the board, a number for that
+    // many empty squares, else a seat and a piece, 0 White and 2 Black, with d
+    // in front of a dead piece), then fields split by "-", the seat to move
+    // first. The 8x8 board is files d-k of ranks 11 down to 4.
+    function placement8x8(fen) {
+        let rows = fen.split('-')[0].split('/');
+        if (rows.length !== 14) return null;
+        let ranks = [];
+        for (let row of rows.slice(3, 11)) {
+            let cells = [];
+            for (let c of row.split(',')) {
+                let m = c.match(/^d?([02])([PNBRQK])$/);
+                if (/^\d+$/.test(c)) for (let k = 0; k < +c; k++) cells.push('1');
+                else cells.push(m ? (m[1] === '0' ? m[2] : m[2].toLowerCase()) : c === 'x' ? 'x' : '?');
+            }
+            let rank = cells.slice(3, 11);
+            if (cells.length !== 14 || rank.some(c => c === 'x' || c === '?')) return null;
+            ranks.push(rank.join('').replace(/1+/g, m => m.length));
+        }
+        return ranks.join('/');
+    }
+
+    // A square of that grid on the 8x8 board: g4 is d1
+    function square8x8(sq) {
+        let m = /^([a-n])(\d+)$/.exec(sq);
+        let file = m ? m[1].charCodeAt(0) - 100 : -1, rank = m ? +m[2] - 3 : 0;
+        return file >= 0 && file < 8 && rank >= 1 && rank <= 8 ? String.fromCharCode(97 + file) + rank : null;
+    }
+
+    // The Chess960 game a variants page shows: its start FEN and its moves as
+    // UCI, a castle going from the king to its rook as the server writes it;
+    // null on other pages and while the game loads
+    function variants960() {
+        let nr = location.pathname.match(/^\/variants\/chess960\/game\/(\d+)/)?.[1];
+        let g = nr && readVariantsGame();
+        if (!g || String(g.gameNr) !== nr) return null;
+        let placement = placement8x8(g.startFen || '');
+        let ucis = g.moves.map(([from, to, promotion]) => {
+            let a = square8x8(from), b = square8x8(to);
+            return a && b ? a + b + promotion.toLowerCase() : null;
+        });
+        if (!placement || ucis.includes(null)) return null;
+        let turn = g.startFen.split('-')[1] === '2' ? 'b' : 'w';
+        return {
+            start: `${placement} ${turn} ${castling960(placement, placement)} - 0 1`,
+            ucis,
+            over: g.gameOver,
+            white: g.players[0] || '',
+            black: g.players[2] || ''
+        };
+    }
+
     // The game to ask about, as { id, url, read }: read takes the response and
     // gives the start FEN, or null for a game that is not Chess960
     function game960() {
@@ -1347,6 +1450,7 @@ if (globalThis.name !== 'em-pthread') {
     // The current game's Chess960 start FEN; null for other games and until it is known
     function chess960Start() {
         if (SITE === 'endgame') return egSecret.start960;
+        if (SITE === 'chesscom' && location.pathname.startsWith('/variants/')) return variants960()?.start || null;
         let game = game960();
         if (!game) return null;
         if (start960.id !== game.id) start960 = { id: game.id, fen: null, known: false, inFlight: false, tries: 0, retryAt: 0 };
@@ -1476,6 +1580,7 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     function isGameOver() {
+        if (SITE === 'chesscom' && location.pathname.startsWith('/variants/')) return !!variants960()?.over;
         if (SITE === 'chesscom') {
             return !!document.querySelector('.game-over-modal-content, .game-over-header-component, [class*="game-over-modal"]');
         }
@@ -1671,25 +1776,31 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     function publishRelayPosition(pos, force = false) {
-        let playedMoves = SITE === 'chesscom' ? readMovesCC() : [];
-        if (SITE === 'chesscom') playedMoves = keepFullRelayHistory(playedMoves);
-        let movesKey = playedMoves.join(' ');
+        // a Chess960 game on the variants server goes as its start and its UCI moves
+        let cv = pos.rules === CC_VARIANTS['chess960'] ? variants960() : null;
+        let playedMoves = SITE === 'chesscom' && !cv ? readMovesCC() : [];
+        if (SITE === 'chesscom' && !cv) playedMoves = keepFullRelayHistory(playedMoves);
+        let movesKey = (cv ? cv.ucis : playedMoves).join(' ');
         if (!force && pos.fen === relayLastFen && movesKey === relayLastMoves) return false;
 
         relayLastFen = pos.fen;
         relayLastMoves = movesKey;
         relayEndSent = false;
-        let players = readPlayers(pos.flipped);
+        let players = cv ? { white: cv.white, black: cv.black, bottom: pos.flipped ? 'black' : 'white' } : readPlayers(pos.flipped);
         // Lets the web app load the finished game from endgame.ai by id
         let gameId = SITE === 'endgame' ? location.pathname.match(/^\/game\/([\w-]+)/)?.[1] : undefined;
-        publish({ v: 1, type: 'pos', site: SITE, gameId, fen: pos.fen, moves: playedMoves, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+        let variantFields = cv ? { variant: 'chess960', startFen: cv.start, ucis: cv.ucis } : {};
+        publish({ v: 1, type: 'pos', site: SITE, gameId, fen: pos.fen, moves: playedMoves, ...variantFields, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
         return true;
     }
 
-    // Variant games stay out of the relay: the web app reads every position as standard chess
+    // Variant games stay out of the relay, since the web app reads a board as
+    // standard chess, except a variants-server Chess960 game sent with its moves
     function readRelayBoard() {
         let pos = readBoard();
-        return pos && !pos.note && (pos.rules || STANDARD) === STANDARD ? pos : null;
+        if (!pos || pos.note) return null;
+        let rules = pos.rules || STANDARD;
+        return rules === STANDARD || (rules === CC_VARIANTS['chess960'] && variants960()) ? pos : null;
     }
 
     function refreshRelayMoves(fen) {

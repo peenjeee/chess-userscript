@@ -67,9 +67,11 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   supported" instead of arrows.
 - **Chess960** (all three sites): the engine runs in Chess960 mode, with
   castling rights taken from the game's start position (looked up once per
-  game from the site's own game API). A suggested castle is drawn to the
-  king's landing square, or as the rook's move when the king already stands
-  there.
+  game from the site's own game API; on chess.com's variants server, read
+  from the page). A suggested castle is drawn to the king's landing square,
+  or as the rook's move when the king already stands there. A Chess960 game
+  on the variants server is relayed with its start position and moves, so
+  the web app follows it like any other game.
 - **endgame.ai**: the script runs the same Stockfish 18 NNUE build as on
   chess.com (cached in IndexedDB) without site-engine fallback. In **Secret
   Queen** games, hidden queens (own square + revealed pieces from API/DOM badges)
