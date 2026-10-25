@@ -64,12 +64,12 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   variant's NNUE network there too, from its own offscreen page, which a
   userscript cannot have. No Castling, and Setup Chess once both sides have
   set up, are standard chess for Stockfish 18. Torpedo, Sideways Pawns,
-  Petrified, Paradigm Chess30, Seirawan Chess and Chaturanga need
-  Fairy-Stockfish, so in the userscript they show "Variant needs the
+  Petrified, Paradigm Chess30, Seirawan Chess, Chaturanga and Duck Chess
+  need Fairy-Stockfish, so in the userscript they show "Variant needs the
   extension". Banked pieces, the side to move and the checks given are
   read from the board and its move list. Any other variant there (Fog of
-  War, Duck Chess, Spell Chess, Blindfold, 4 Player, custom rules) shows
-  "Variant not supported" instead of arrows.
+  War, Spell Chess, Blindfold, 4 Player, custom rules) shows "Variant not
+  supported" instead of arrows.
 - **Chess960** (all three sites): the engine runs in Chess960 mode, with
   castling rights taken from the game's start position (looked up once per
   game from the site's own game API). A suggested castle is drawn to the

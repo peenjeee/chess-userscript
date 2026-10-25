@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.5
+// @version      3.6
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -350,7 +350,9 @@
         // the server draws a piece under its display name when it has one, else its letter
         'seirawan-chess': { ...STANDARD, uci: 'seirawan', nnue: 'seirawan-432c65fe71fc', pieces: { hawk: 'h', H: 'h', seirawanElephant: 'e', E: 'e' } },
         // its ferz and elephant are not the queen and bishop the check test knows
-        'chaturanga': { ...STANDARD, uci: 'chaturanga', nnue: 'chaturanga-1889e98f8d54', pieces: { chariot: 'r', elephant: 'b', I: 'b', F: 'q' }, check: 'none', castling: false }
+        'chaturanga': { ...STANDARD, uci: 'chaturanga', nnue: 'chaturanga-1889e98f8d54', pieces: { chariot: 'r', elephant: 'b', I: 'b', F: 'q' }, check: 'none', castling: false },
+        // kings are captured, not mated, so a king may stand attacked
+        'duck-chess': { ...STANDARD, uci: 'duck', nnue: 'duck-ba21f91f5d81', check: 'none' }
     };
 
     // SF10 is lichess's build, so it plays the lichess variants; the others need Fairy-Stockfish
@@ -370,15 +372,19 @@
         return side('w', 1, castling.replace(/[kq]/g, '')) + side('b', 8, castling.replace(/[KQ]/g, ''));
     }
 
-    // The moves played so far, as SAN, from the variants server's move list
+    // The moves played so far, as SAN, from the variants server's move list.
+    // A duck chess turn shows where the duck went after its move ("Nf6 Θf1").
     function movesCV() {
         let list = document.querySelector('[class*=moves-list]')?.parentElement;
         if (!list) return [];
         return [...list.querySelectorAll('span')]
             .filter(s => !s.children.length)
-            .map(s => s.textContent.trim())
+            .map(s => s.textContent.trim().replace(/ Θ[a-h][1-8]$/, ''))
             .filter(t => /^(@?[NBRQKP]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?|O-O(-O)?)[+#]?$/.test(t));
     }
+
+    // the duck chess turn last read: move count and side, duck square, placement
+    let duckTurn = { key: '', duckAt: -1, placement: '' };
 
     // The variants server draws its own board: pieces are divs with data-piece
     // and data-color (5 White, 6 Black, 7 stone) placed by transform in square
@@ -404,8 +410,9 @@
         for (let p of b.querySelectorAll('.TheBoard-pieces .piece')) {
             let m = (p.style.transform || '').match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
             let name = p.dataset.piece || '';
-            let type = rules.pieces?.[name] || (/^[PNBRQK]$/.test(name) ? name.toLowerCase() : null);
-            let color = { 5: 'w', 6: 'b', 7: rules.walls ? '*' : null }[p.dataset.color];
+            // the duck (Θ, colour 7 like a stone) blocks a square the way a wall does
+            let type = name === 'Θ' ? '*' : rules.pieces?.[name] || (/^[PNBRQK]$/.test(name) ? name.toLowerCase() : null);
+            let color = type === '*' ? '*' : { 5: 'w', 6: 'b', 7: rules.walls ? '*' : null }[p.dataset.color];
             if (!m || !color || !type) continue;
             let col = Math.round(+m[1] / size), row = Math.round(+m[2] / size);
             if (color !== '*' && (col < 0 || col > 7)) { pocket[color] += type; continue; }
@@ -428,6 +435,15 @@
                 let pc = grid[c + ',' + r];
                 f += !pc ? "1" : pc === '*' ? '*' : pc[0] === 'w' ? pc[1].toUpperCase() : pc[1];
             }
+        }
+        // A duck chess turn is a move and then the duck. In between, the board
+        // shows the move while the turn and the move list stand still; that is
+        // no position, so the turn's arrows stay up until the duck is down. A
+        // move that ends a turn always moves the duck.
+        if (rules.uci === 'duck') {
+            let key = sans.length + turn, duckAt = f.indexOf('*');
+            if (duckTurn.key === key && duckTurn.duckAt === duckAt && duckTurn.placement !== f) return null;
+            duckTurn = { key, duckAt, placement: f };
         }
         let castling = "";
         if (rules.castling && grid['5,1'] === 'wk') {
@@ -732,7 +748,12 @@
         // a Seirawan gating move (b1c3h) brings the hawk or elephant in on the back-rank
         // square it leaves; a promotion to one starts on the rank before the last
         let gate = /^[he]$/.test(m[4] || '') && /^[18]$/.test(m[1]) ?`<text x="${p1.x}" y="${p1.y}" text-anchor="middle" dominant-baseline="central" font-size="5" font-weight="700" font-family="sans-serif" fill="${col}" fill-opacity="0.9">${m[4].toUpperCase()}</text>` : "";
-        return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.5 : 1}" stroke-opacity="0.9" stroke-linejoin="round" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} marker-end="url(#arr-${i < 3 ? i : 'p'})" />` + gate;
+        // a duck chess move (e2e4,e4c3) ends with the square the duck goes to
+        let duckTo = m.match(/,[a-h][1-8]([a-h][1-8])$/)?.[1];
+        let p3 = duckTo && c(duckTo[0], duckTo[1]);
+        let duck = p3 ? `<circle cx="${p3.x}" cy="${p3.y}" r="5" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.2 : 0.8}" stroke-opacity="0.9" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} />`
+            + `<text x="${p3.x}" y="${p3.y}" text-anchor="middle" dominant-baseline="central" font-size="5">🦆</text>` : "";
+        return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.5 : 1}" stroke-opacity="0.9" stroke-linejoin="round" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} marker-end="url(#arr-${i < 3 ? i : 'p'})" />` + gate + duck;
     }
 
     function renderEGThreats(flip) {
