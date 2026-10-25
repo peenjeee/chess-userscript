@@ -43,10 +43,17 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   userscript manager asks) and caches the 113MB in IndexedDB, so it downloads
   once ever, not once per page.
 - **lichess variants** (King of the Hill, Three-Check, Antichess, Atomic,
-  Horde, Racing Kings, Crazyhouse) run on multi-variant Stockfish 10
+  Horde, Racing Kings, Crazyhouse) run on Fairy-Stockfish 14 with the
+  variant's NNUE network, the engine lichess's own analysis uses
+  ([lichess-org/stockfish-web](https://github.com/lichess-org/stockfish-web),
+  fetched from jsDelivr at a pinned version and checked against its
+  SHA-256). Each network comes once from lichess's asset host (about 1MB for
+  antichess and horde, 48-59MB for the others), is checked against the hash
+  in its name and cached. Approve the `cdn.jsdelivr.net` and `lichess1.org`
+  permissions if asked. Where threads are not available, or it fails, the
+  script falls back to multi-variant Stockfish 10
   ([lichess-org/stockfish.js](https://github.com/lichess-org/stockfish.js),
-  GPLv3, ~0.6MB) fetched from jsDelivr at a pinned version and checked
-  against its SHA-256 (approve the `cdn.jsdelivr.net` permission if asked).
+  GPLv3, ~0.6MB).
   Crazyhouse pockets and three-check counters are read from the page; a
   suggested drop shows as a ringed square with the piece letter. Variant
   games are not relayed, since the web app analyzes standard chess only.

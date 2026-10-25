@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -13,6 +13,7 @@
 // @connect      localhost
 // @connect      chess.0xpnj.dev
 // @connect      cdn.jsdelivr.net
+// @connect      lichess1.org
 // ==/UserScript==
 
 (function() {
@@ -39,6 +40,19 @@
         js: "064175042d8b72eb9fba8311b730f6f5cebcfec736494698d675dc433f3bd275",
         wasm: "45816b436eb8c180acb2c5b9fda0148101f411edbfa6bf919918e0a362eafca8"
     };
+    // Where threads are allowed (lichess game pages are cross-origin isolated)
+    // the variants run on the stronger Fairy-Stockfish 14 with a network per
+    // variant: the build lichess's own analysis uses (github.com/lichess-org/
+    // stockfish-web, AGPLv3; Fairy-Stockfish is GPLv3), pinned and checked the
+    // same way. Each network comes from lichess's asset host and is named
+    // after the start of its own SHA-256.
+    const FSF_JS = "https://cdn.jsdelivr.net/npm/@lichess-org/stockfish-web@0.5.0/fsf_14.js";
+    const FSF_WASM = "https://cdn.jsdelivr.net/npm/@lichess-org/stockfish-web@0.5.0/fsf_14.wasm";
+    const FSF_SHA256 = {
+        js: "d22d4e7df089b86fdcb678a795a2116d52a06e041fc91819448fc93eb3f3021f",
+        wasm: "e9c04dff71870770a515f1d1257aca4d7cebe2915339e9f847aebdc0c8ca74e0"
+    };
+    const NNUE_URL = "https://lichess1.org/assets/lifat/nnue/";
     const CLOUD_EVAL = "https://lichess.org/api/cloud-eval";
 
     // Relay (mirrors the game to the Chess Analyzer web app via its SSE API)
@@ -107,13 +121,13 @@
             } catch (e) { resolve(null); }
         });
     }
-    let idbGetWasm = () => idbStore('readonly', (st, done) => {
-        let g = st.get('sf18-wasm');
+    let idbGet = (key) => idbStore('readonly', (st, done) => {
+        let g = st.get(key);
         g.onsuccess = () => done(g.result || null);
         g.onerror = () => done(null);
     });
-    let idbPutWasm = (buf) => idbStore('readwrite', (st, done) => {
-        st.put(buf, 'sf18-wasm');
+    let idbPut = (key, buf) => idbStore('readwrite', (st, done) => {
+        st.put(buf, key);
         st.transaction.oncomplete = () => done(true);
     });
 
@@ -180,20 +194,21 @@
     }
 
     // lichess variants by the key in the game's `variant-*` class. `uci` is the
-    // engine's name for it; the rest is what playableFen accepts: kings per
+    // engine's name for it and `nnue` Fairy-Stockfish's network for it; the
+    // rest is what playableFen accepts: kings per
     // side (null: any number), what a king in check means (royal: it is that
     // side's turn; atomic: the same unless the kings touch; never: the board
     // was misread; none: kings are ordinary pieces), and whether castling and
     // white pawns on rank 1 occur. Other keys (chess960, fromPosition) stay standard.
     const STANDARD = { uci: 'chess', kings: [1, 1], check: 'royal', castling: true, firstRankPawns: false };
     const LI_VARIANTS = {
-        kingOfTheHill: { ...STANDARD, uci: 'kingofthehill' },
-        threeCheck: { ...STANDARD, uci: '3check' },
-        crazyhouse: { ...STANDARD, uci: 'crazyhouse' },
-        atomic: { ...STANDARD, uci: 'atomic', check: 'atomic' },
-        horde: { ...STANDARD, uci: 'horde', kings: [0, 1], firstRankPawns: true },
-        racingKings: { ...STANDARD, uci: 'racingkings', check: 'never', castling: false },
-        antichess: { ...STANDARD, uci: 'giveaway', kings: null, check: 'none', castling: false }
+        kingOfTheHill: { ...STANDARD, uci: 'kingofthehill', nnue: 'kingofthehill-978b86d0e6a4' },
+        threeCheck: { ...STANDARD, uci: '3check', nnue: '3check-cb5f517c228b' },
+        crazyhouse: { ...STANDARD, uci: 'crazyhouse', nnue: 'crazyhouse-8ebf84784ad2' },
+        atomic: { ...STANDARD, uci: 'atomic', nnue: 'atomic-2cf13ff256cc', check: 'atomic' },
+        horde: { ...STANDARD, uci: 'horde', nnue: 'horde-28173ddccabe', kings: [0, 1], firstRankPawns: true },
+        racingKings: { ...STANDARD, uci: 'racingkings', nnue: 'racingkings-636b95f085e3', check: 'never', castling: false },
+        antichess: { ...STANDARD, uci: 'antichess', nnue: 'antichess-dd3cbe53cd4e', kings: null, check: 'none', castling: false }
     };
 
     function readBoardLI() {
@@ -717,6 +732,8 @@
     let bootTimer = null, retryTimer = null;
     let usingFallback = false;
     let engineVariant = 'chess';   // UCI_Variant the worker plays; standard chess runs on SF18
+    let engineFsf = false;         // whether the worker is Fairy-Stockfish rather than SF10
+    let fsfBroken = false;         // Fairy-Stockfish failed on this page: variants use SF10
     let engine960 = false;         // UCI_Chess960 as last sent to the worker
     let pending960 = false;        // whether pendingFen is a Chess960 position
     let searchBoard960 = null;     // the Chess960 board being searched, to spot castling moves
@@ -728,10 +745,10 @@
     async function createRemoteWorker() {
         let src = await fetchText(REMOTE_JS);
         let blobUrl = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
-        let bytes = await idbGetWasm();
+        let bytes = await idbGet('sf18-wasm');
         if (!bytes) {
             bytes = await fetchBytes(REMOTE_WASM);
-            await idbPutWasm(bytes);
+            await idbPut('sf18-wasm', bytes);
         }
         let wasmRef = URL.createObjectURL(new Blob([bytes], { type: "application/wasm" }));
         return new Worker(blobUrl + "#" + wasmRef);
@@ -755,6 +772,60 @@
         return new Worker(blobUrl + "#" + wasmRef);
     }
 
+    // Fairy-Stockfish's module and this UCI bridge run in one blob module
+    // worker, and its threads start from the same blob, so nothing is
+    // imported past the page's script policy. The bridge loads the variant's
+    // network before passing UCI commands on; a failed start is thrown from
+    // a timer so it reaches the worker's onerror.
+    const FSF_BRIDGE = `
+if (globalThis.name !== 'em-pthread') {
+    let queue = [], sf = null;
+    self.onmessage = async e => {
+        if (e.data && e.data.boot) {
+            let b = e.data.boot;
+            try {
+                sf = await Fsf_14_Web({ locateFile: () => b.wasm, mainScriptUrlOrBlob: import.meta.url });
+                sf.listen = line => postMessage(line);
+                sf.onError = line => postMessage('info string ' + line);
+                sf.uci('setoption name UCI_Variant value ' + b.variant);
+                sf.setNnueBuffer(new Uint8Array(b.nnue), 0);
+                queue.forEach(c => sf.uci(c));
+                queue = null;
+            } catch (err) {
+                setTimeout(() => { throw err; });
+            }
+        } else if (queue) queue.push(e.data);
+        else sf.uci(e.data);
+    };
+}`;
+
+    // A variant's network: fetched once, checked against the hash in its name, then kept in IndexedDB
+    async function loadNnue(name) {
+        let bytes = await idbGet('nnue-' + name);
+        if (bytes) return bytes;
+        bytes = await fetchBytes(NNUE_URL + name + '.nnue');
+        if (!(await sha256(bytes)).startsWith(name.split('-').pop())) {
+            throw new Error('network ' + name + ' does not match its name');
+        }
+        await idbPut('nnue-' + name, bytes);
+        return bytes;
+    }
+
+    let fsfUsable = () => !fsfBroken && self.crossOriginIsolated === true && typeof SharedArrayBuffer === 'function';
+
+    async function createFsfWorker(variant) {
+        let rules = Object.values(LI_VARIANTS).find(v => v.uci === variant);
+        let [src, wasm, nnue] = await Promise.all([fetchText(FSF_JS), fetchBytes(FSF_WASM), loadNnue(rules.nnue)]);
+        if (await sha256(src) !== FSF_SHA256.js || await sha256(wasm) !== FSF_SHA256.wasm) {
+            throw new Error('Fairy-Stockfish files do not match their pinned hashes');
+        }
+        let blobUrl = URL.createObjectURL(new Blob([src + FSF_BRIDGE], { type: "text/javascript" }));
+        let wasmRef = URL.createObjectURL(new Blob([wasm], { type: "application/wasm" }));
+        let w = new Worker(blobUrl, { type: "module" });
+        w.postMessage({ boot: { wasm: wasmRef, nnue, variant } }, [nnue]);
+        return w;
+    }
+
     function wireEngine(w) {
         w.onmessage = e => {
             if (engine !== w) return;  // a replaced worker must not touch the arrows
@@ -765,9 +836,17 @@
                     w.postMessage("setoption name Threads value 1");
                     w.postMessage("setoption name Hash value 64");
                     w.postMessage("setoption name Use NNUE value true");
-                } else {
-                    // the variant build has one fixed thread and hash, and setting Threads hangs it
+                } else if (engineFsf) {
+                    // "uci" resets the variant chosen at boot (the network stays loaded),
+                    // so it is set again, as lichess does; half the cores, at most four
+                    let threads = Math.max(1, Math.min(4, Math.floor((navigator.hardwareConcurrency || 2) / 2)));
                     w.postMessage("setoption name UCI_Variant value " + engineVariant);
+                    w.postMessage("setoption name Threads value " + threads);
+                    w.postMessage("setoption name Hash value 64");
+                } else {
+                    // SF10 has one fixed thread and hash, and setting Threads hangs it;
+                    // like lichess, it calls antichess giveaway
+                    w.postMessage("setoption name UCI_Variant value " + (engineVariant === 'antichess' ? 'giveaway' : engineVariant));
                 }
                 w.postMessage("isready");
                 return;
@@ -807,6 +886,7 @@
         w.onerror = () => {
             w.terminate();
             if (engine !== w) return;
+            if (engineFsf) fsfBroken = true;
             engine = null;
             engineReady = false;
             searching = false;
@@ -857,15 +937,21 @@
         if (engine || engineFailed || engineStarting || !iv) return;
         engineStarting = true;
         let variant = engineVariant;
+        let fsf = variant !== 'chess' && fsfUsable();
         let btn = document.getElementById("sa-btn");
-        if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~113MB)" : "Loading variant engine…";
+        if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~113MB)"
+            : fsf ? "Loading variant engine… (one-time, up to ~59MB)" : "Loading variant engine…";
         try {
             let w = usingFallback ? new Worker(CC_FALLBACK)
-                : variant === 'chess' ? await createRemoteWorker() : await createVariantWorker();
+                : variant === 'chess' ? await createRemoteWorker()
+                : fsf ? await createFsfWorker(variant) : await createVariantWorker();
             // the analyzer stopped, or a game of another variant came up, while loading
             if (!iv || variant !== engineVariant) { w.terminate(); return; }
-            startWorker(w, usingFallback ? 20000 : 300000);
+            engineFsf = fsf;
+            startWorker(w, usingFallback ? 20000 : fsf ? 60000 : 300000);
         } catch (e) {
+            // a Fairy-Stockfish that cannot load leaves the variants to SF10
+            if (fsf) fsfBroken = true;
             // a failed load of a variant nobody wants any more is not a strike against the new one
             if (variant === engineVariant) engineFailedOnce();
         } finally {
