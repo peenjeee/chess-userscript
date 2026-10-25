@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.9
-// @description  Chess analyzer with full Stockfish 18 NNUE, lichess and endgame.ai support, and web-app relay
+// @version      3.0
+// @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
 // @match        https://lichess.org/*
@@ -12,6 +12,7 @@
 // @grant        GM.xmlHttpRequest
 // @connect      localhost
 // @connect      chess.0xpnj.dev
+// @connect      cdn.jsdelivr.net
 // ==/UserScript==
 
 (function() {
@@ -28,6 +29,16 @@
     const REMOTE_WASM = "https://chess.0xpnj.dev/stockfish-18-single.wasm";
     // chess.com's internal engine as a fallback (chess.com pages only)
     const CC_FALLBACK = "/bundles/app/js/vendor/jschessengine/stockfish.asm.1abfa10c.js";
+    // lichess variants run on multi-variant Stockfish 10 (GPLv3,
+    // github.com/lichess-org/stockfish.js): one thread and no SharedArrayBuffer,
+    // so it runs wherever SF18 does. Pinned on jsDelivr and checked byte for
+    // byte, since it runs with the page's origin.
+    const MV_JS = "https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.wasm.js";
+    const MV_WASM = "https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.wasm";
+    const MV_SHA256 = {
+        js: "064175042d8b72eb9fba8311b730f6f5cebcfec736494698d675dc433f3bd275",
+        wasm: "45816b436eb8c180acb2c5b9fda0148101f411edbfa6bf919918e0a362eafca8"
+    };
     const CLOUD_EVAL = "https://lichess.org/api/cloud-eval";
 
     // Relay (mirrors the game to the Chess Analyzer web app via its SSE API)
@@ -168,9 +179,28 @@
         };
     }
 
+    // lichess variants by the key in the game's `variant-*` class. `uci` is the
+    // engine's name for it; the rest is what playableFen accepts: kings per
+    // side (null: any number), what a king in check means (royal: it is that
+    // side's turn; atomic: the same unless the kings touch; never: the board
+    // was misread; none: kings are ordinary pieces), and whether castling and
+    // white pawns on rank 1 occur. Other keys (chess960, fromPosition) stay standard.
+    const STANDARD = { uci: 'chess', kings: [1, 1], check: 'royal', castling: true, firstRankPawns: false };
+    const LI_VARIANTS = {
+        kingOfTheHill: { ...STANDARD, uci: 'kingofthehill' },
+        threeCheck: { ...STANDARD, uci: '3check' },
+        crazyhouse: { ...STANDARD, uci: 'crazyhouse' },
+        atomic: { ...STANDARD, uci: 'atomic', check: 'atomic' },
+        horde: { ...STANDARD, uci: 'horde', kings: [0, 1], firstRankPawns: true },
+        racingKings: { ...STANDARD, uci: 'racingkings', check: 'never', castling: false },
+        antichess: { ...STANDARD, uci: 'giveaway', kings: null, check: 'none', castling: false }
+    };
+
     function readBoardLI() {
         let b = document.querySelector('cg-board');
         if (!b) return null;
+        let host = b.closest('.round__app, main.analyse');
+        let rules = LI_VARIANTS[host?.className.match(/\bvariant-(\w+)/)?.[1]] || STANDARD;
         let wrap = b.closest('.cg-wrap') || document.querySelector('.cg-wrap');
         let flipped = !!wrap && wrap.classList.contains('orientation-black');
         let size = b.getBoundingClientRect().width / 8;
@@ -193,6 +223,9 @@
 
         let lastSquares = [];
         b.querySelectorAll('square.last-move').forEach(sq => {
+            // chessground hides squares it no longer needs instead of removing them,
+            // and a hidden one keeps the classes of an older move or selection
+            if (sq.style.display === 'none') return;
             let s = sqOf(sq);
             if (s) lastSquares.push(s);
         });
@@ -214,6 +247,19 @@
 
         if (lastColor === 'w') currentTurn = 'b';
         else if (lastColor === 'b') currentTurn = 'w';
+        else {
+            // Nothing stands on the last-move squares: an atomic capture blew
+            // them up, a Chess960 castle left king and rook elsewhere, or there
+            // is no last move. The analysis board's current move still gives
+            // the ply (two path characters per ply), a live game's running clock
+            // the side to move, and before the first move it is White's turn.
+            let active = host?.querySelector('move.active');
+            let clock = document.querySelector('.rclock.running');
+            if (active) currentTurn = (active.getAttribute('p') || '').length / 2 % 2 ? 'b' : 'w';
+            else if (clock?.classList.contains('rclock-white')) currentTurn = 'w';
+            else if (clock?.classList.contains('rclock-black')) currentTurn = 'b';
+            else if (!lastSquares.length) currentTurn = 'w';
+        }
 
         let f = "";
         for (let r = 8; r >= 1; r--) {
@@ -224,19 +270,40 @@
             }
         }
         let castling = "";
-        if (grid['5,1'] === 'wk') {
+        if (rules.castling && grid['5,1'] === 'wk') {
             if (grid['8,1'] === 'wr') castling += "K";
             if (grid['1,1'] === 'wr') castling += "Q";
         }
-        if (grid['5,8'] === 'bk') {
+        if (rules.castling && grid['5,8'] === 'bk') {
             if (grid['8,8'] === 'br') castling += "k";
             if (grid['1,8'] === 'br') castling += "q";
+        }
+
+        // Crazyhouse pockets sit beside the board: one piece per role, its count in data-nb
+        let pocket = "";
+        if (rules.uci === 'crazyhouse') {
+            host.querySelectorAll('.pocket piece').forEach(p => {
+                let type = Object.keys(TYPES).find(k => p.classList.contains(k));
+                if (!type) return;
+                let letter = p.classList.contains('white') ? TYPES[type].toUpperCase() : TYPES[type];
+                pocket += letter.repeat(+p.dataset.nb || 0);
+            });
+            pocket = "[" + pocket + "]";
+        }
+        // Three-check: each check given shows as a king icon in the giver's
+        // material bar; the engine wants the checks each side has left
+        let checks = "";
+        if (rules.uci === '3check') {
+            let given = side => host.querySelectorAll(`.material-${side} mpiece.king`).length;
+            let [byWhite, byBlack] = flipped ? [given('top'), given('bottom')] : [given('bottom'), given('top')];
+            checks = Math.max(0, 3 - byWhite) + "+" + Math.max(0, 3 - byBlack) + " ";
         }
 
         return {
             board: b,
             flipped,
-            fen: f.replace(/1+/g, m => m.length) + " " + currentTurn + " " + (castling || "-") + " - 0 1"
+            rules,
+            fen: f.replace(/1+/g, m => m.length) + pocket + " " + currentTurn + " " + (castling || "-") + " - " + checks + "0 1"
         };
     }
 
@@ -267,7 +334,7 @@
     // the overlay and alerts only show once it has said yes
     const SECRET_RETRY_MS = 5000;
     function newSecretState(gameId) {
-        return { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, secret: null, retryAt: 0, spectating: false, lastOppPawns: null, queenCapturedNotified: false };
+        return { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, secret: null, start960: null, retryAt: 0, spectating: false, lastOppPawns: null, queenCapturedNotified: false };
     }
     let egSecret = newSecretState('');
 
@@ -319,13 +386,14 @@
         }
     }
 
-    // The public game endpoint names the variant for anyone: players,
-    // spectators and logged-out visitors. null: no answer yet, ask again later
-    function fetchIsSecretQueen(gameId) {
+    // The public game endpoint names the variant, and a Chess960 game's start
+    // position, for anyone: players, spectators and logged-out visitors.
+    // null: no answer yet, ask again later
+    function fetchEGGame(gameId) {
         return fetch('/api/games/' + encodeURIComponent(gameId), { headers: { 'Accept': 'application/json' } })
             .then(r => {
-                if (r.status === 404) return false;
-                return r.ok ? r.json().then(g => g?.variant === 'SecretQueen') : null;
+                if (r.status === 404) return {};
+                return r.ok ? r.json().then(g => g || {}) : null;
             });
     }
 
@@ -335,12 +403,13 @@
         if (Date.now() < state.retryAt) return;
         state.inFlight = true;
         state.retryAt = Date.now() + SECRET_RETRY_MS;
-        fetchIsSecretQueen(state.gameId)
-            .then(secret => {
-                if (secret === null || egSecret !== state) return;
-                state.secret = secret;
+        fetchEGGame(state.gameId)
+            .then(g => {
+                if (!g || egSecret !== state) return;
+                state.secret = g.variant === 'SecretQueen';
+                state.start960 = g.variant === 'Chess960' && typeof g.startingFen === 'string' ? g.startingFen : null;
                 // the overlay was held back until now, and the board may not move again soon
-                if (secret) render(lastEGFlipped);
+                if (state.secret) render(lastEGFlipped);
             })
             .catch(() => {})
             .finally(() => { state.inFlight = false; });
@@ -497,9 +566,16 @@
             if (flip) { x = 9 - x; y = 9 - y; }
             return { x: (x - 1) * 12.5 + 6.25, y: (8 - y) * 12.5 + 6.25 };
         };
+        let col = ["#3b82f6", "#ef4444", "#22c55e", "#a855f7"][i];
+        // a crazyhouse drop (N@f3) rings the square and names the piece
+        if (m[1] === '@') {
+            let p = c(m[2], m[3]);
+            if (!p) return "";
+            return `<circle cx="${p.x}" cy="${p.y}" r="5" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.2 : 0.8}" stroke-opacity="0.9" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} />`
+                + `<text x="${p.x}" y="${p.y}" text-anchor="middle" dominant-baseline="central" font-size="5" font-weight="700" font-family="sans-serif" fill="${col}" fill-opacity="0.9">${m[0]}</text>`;
+        }
         let p1 = c(m[0], m[1]), p2 = c(m[2], m[3]);
         if (!p1 || !p2) return "";
-        let col = ["#3b82f6", "#ef4444", "#22c55e", "#a855f7"][i];
         let dx = Math.abs(F[m[2]] - F[m[0]]), dy = Math.abs(+m[3] - +m[1]);
         let isN = (dx === 1 && dy === 2) || (dx === 2 && dy === 1);
         let d = isN ? `M ${p1.x} ${p1.y} L ${p1.x} ${p2.y} L ${p2.x} ${p2.y}` : `M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`;
@@ -576,13 +652,33 @@
         return out;
     }
 
+    // Chess960 castling comes as king-takes-own-rook (f1h1). Draw where the
+    // king lands, or the rook's move when the king already stands there.
+    // The ponder move is read on the board after the best move, so a king
+    // recapturing on the square a rook was just taken on stays a capture.
+    function shown960(m, after) {
+        if (!searchBoard960 || !m || m.length < 4 || m[1] === '@') return m;
+        let board = searchBoard960;
+        if (after && after.length >= 4 && after[1] !== '@') {
+            board = board.map(row => row.slice());
+            let [fr, fc, tr, tc] = [8 - +after[1], 'abcdefgh'.indexOf(after[0]), 8 - +after[3], 'abcdefgh'.indexOf(after[2])];
+            if (board[fr] && board[tr]) { board[tr][tc] = board[fr][fc]; board[fr][fc] = ''; }
+        }
+        let at = sq => board[8 - +sq[1]]?.['abcdefgh'.indexOf(sq[0])] || '';
+        let king = at(m.slice(0, 2)), rook = at(m.slice(2, 4));
+        if (!/^[Kk]$/.test(king) || rook !== (king === 'K' ? 'R' : 'r')) return m;
+        let short = m[2] > m[0], rank = m[1];
+        let kingTo = (short ? 'g' : 'c') + rank;
+        return kingTo !== m.slice(0, 2) ? m.slice(0, 2) + kingTo : m.slice(2, 4) + (short ? 'f' : 'd') + rank;
+    }
+
     function render(flip) {
         let svg = document.getElementById("sa-arrows");
         if (!svg) return;
         let threats = renderEGThreats(flip);
         svg.innerHTML = `<defs>${["#3b82f6", "#ef4444", "#22c55e", "#a855f7"].map((c, i) => `<marker id="arr-${i === 3 ? 'p' : i}" orient="auto" markerWidth="4" markerHeight="4" refX="3" refY="2"><polygon points="0,0 4,2 0,4" fill="${c}"/></marker>`).join('')}</defs>`
             + threats
-            + (ponder ? draw(ponder, 3, flip) : "") + [2, 1, 0].map(i => draw(moves[i], i, flip)).join("");
+            + (ponder ? draw(shown960(ponder, moves[0]), 3, flip) : "") + [2, 1, 0].map(i => draw(shown960(moves[i]), i, flip)).join("");
     }
 
     // ------------------------------------------------------------ score badge
@@ -620,6 +716,10 @@
     let engineFlip = false;
     let bootTimer = null, retryTimer = null;
     let usingFallback = false;
+    let engineVariant = 'chess';   // UCI_Variant the worker plays; standard chess runs on SF18
+    let engine960 = false;         // UCI_Chess960 as last sent to the worker
+    let pending960 = false;        // whether pendingFen is a Chess960 position
+    let searchBoard960 = null;     // the Chess960 board being searched, to spot castling moves
     // A failed load or a crashed worker is retried a few times before giving up
     const ENGINE_RETRIES = 3;
     const ENGINE_RETRY_MS = 3000;
@@ -637,15 +737,38 @@
         return new Worker(blobUrl + "#" + wasmRef);
     }
 
+    async function sha256(data) {
+        let digest = await crypto.subtle.digest('SHA-256', typeof data === 'string' ? new TextEncoder().encode(data) : data);
+        return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function createVariantWorker() {
+        let [src, bytes] = await Promise.all([fetchText(MV_JS), fetchBytes(MV_WASM)]);
+        if (await sha256(src) !== MV_SHA256.js || await sha256(bytes) !== MV_SHA256.wasm) {
+            throw new Error('variant engine files do not match their pinned hashes');
+        }
+        // The loader looks for stockfish.wasm beside itself, which a blob worker
+        // has not got, so it reads the wasm blob from the worker URL hash instead
+        src = src.replace('locateFile:function(e){return e}', 'locateFile:function(){return self.location.hash.slice(1)}');
+        let blobUrl = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
+        let wasmRef = URL.createObjectURL(new Blob([bytes], { type: "application/wasm" }));
+        return new Worker(blobUrl + "#" + wasmRef);
+    }
+
     function wireEngine(w) {
         w.onmessage = e => {
             if (engine !== w) return;  // a replaced worker must not touch the arrows
             let str = String(e.data || "");
             if (str === "uciok") {
                 w.postMessage("setoption name MultiPV value 3");
-                w.postMessage("setoption name Threads value 1");
-                w.postMessage("setoption name Hash value 64");
-                w.postMessage("setoption name Use NNUE value true");
+                if (engineVariant === 'chess') {
+                    w.postMessage("setoption name Threads value 1");
+                    w.postMessage("setoption name Hash value 64");
+                    w.postMessage("setoption name Use NNUE value true");
+                } else {
+                    // the variant build has one fixed thread and hash, and setting Threads hangs it
+                    w.postMessage("setoption name UCI_Variant value " + engineVariant);
+                }
                 w.postMessage("isready");
                 return;
             }
@@ -721,6 +844,7 @@
     function startWorker(w, bootMs) {
         engine = w;
         engineReady = false;
+        engine960 = false;
         wireEngine(w);
         clearTimeout(bootTimer);
         bootTimer = setTimeout(() => {
@@ -732,16 +856,21 @@
     async function ensureEngine() {
         if (engine || engineFailed || engineStarting || !iv) return;
         engineStarting = true;
+        let variant = engineVariant;
         let btn = document.getElementById("sa-btn");
-        if (btn && !usingFallback) btn.innerHTML = "Loading engine… (one-time ~113MB)";
+        if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~113MB)" : "Loading variant engine…";
         try {
-            let w = usingFallback ? new Worker(CC_FALLBACK) : await createRemoteWorker();
-            if (!iv) { w.terminate(); return; }  // analyzer stopped while loading
+            let w = usingFallback ? new Worker(CC_FALLBACK)
+                : variant === 'chess' ? await createRemoteWorker() : await createVariantWorker();
+            // the analyzer stopped, or a game of another variant came up, while loading
+            if (!iv || variant !== engineVariant) { w.terminate(); return; }
             startWorker(w, usingFallback ? 20000 : 300000);
         } catch (e) {
-            engineFailedOnce();
+            // a failed load of a variant nobody wants any more is not a strike against the new one
+            if (variant === engineVariant) engineFailedOnce();
         } finally {
             engineStarting = false;
+            if (variant !== engineVariant) ensureEngine();
         }
     }
 
@@ -760,13 +889,26 @@
         moves = []; ponder = "";
         searching = true;
         searchTurn = f.split(' ')[1];
+        if (pending960 !== engine960) {
+            engine960 = pending960;
+            engine.postMessage("setoption name UCI_Chess960 value " + engine960);
+        }
+        searchBoard960 = engine960 ? parsePlacement(f.split(' ')[0]) : null;
         engine.postMessage("position fen " + f);
         engine.postMessage("go infinite");
     }
 
-    function analyzeWorker(fen, flip) {
+    function analyzeWorker(fen, flip, variant, chess960) {
+        // a worker plays one variant, so a game of another variant gets a fresh one
+        if (variant !== engineVariant) {
+            stopEngine();
+            engineVariant = variant;
+            engineFailed = false;
+            engineRetries = 0;
+        }
         engineFlip = flip;
         pendingFen = fen;
+        pending960 = chess960;
         ensureEngine();
         pump();
     }
@@ -840,25 +982,113 @@
 
     // The FEN to analyze, or null when the board cannot be a real position.
     // Only the side to move can be in check, so a check fixes a misread turn.
-    function playableFen(fen) {
+    function playableFen(fen, rules = STANDARD) {
         let [placement, turn, ...rest] = fen.split(' ');
-        let board = parsePlacement(placement);
+        // a crazyhouse pocket follows the placement in brackets
+        let board = parsePlacement(placement.replace(/\[.*\]$/, ''));
         if (!board) return null;
         let kings = { K: [], k: [] };
         for (let r = 0; r < 8; r++) {
             for (let c = 0; c < 8; c++) {
                 let p = board[r][c];
                 if (p === 'K' || p === 'k') kings[p].push([r, c]);
-                if ((p === 'P' || p === 'p') && (r === 0 || r === 7)) return null;
+                if (p === 'p' && (r === 0 || r === 7)) return null;
+                if (p === 'P' && (r === 0 || (r === 7 && !rules.firstRankPawns))) return null;
             }
         }
-        if (kings.K.length !== 1 || kings.k.length !== 1) return null;
-        let whiteInCheck = attackedBy(board, kings.K[0][0], kings.K[0][1], false);
-        let blackInCheck = attackedBy(board, kings.k[0][0], kings.k[0][1], true);
+        if (rules.kings && (kings.K.length !== rules.kings[0] || kings.k.length !== rules.kings[1])) return null;
+        if (rules.check === 'none') return fen;
+        // atomic kings that touch cannot take each other, so neither is in check
+        let touching = kings.K.length === 1 && kings.k.length === 1
+            && Math.abs(kings.K[0][0] - kings.k[0][0]) <= 1 && Math.abs(kings.K[0][1] - kings.k[0][1]) <= 1;
+        let inCheck = (own, byWhite) => own.length === 1 && !(rules.check === 'atomic' && touching)
+            && attackedBy(board, own[0][0], own[0][1], byWhite);
+        let whiteInCheck = inCheck(kings.K, false);
+        let blackInCheck = inCheck(kings.k, true);
         if (whiteInCheck && blackInCheck) return null;
+        if (rules.check === 'never' && (whiteInCheck || blackInCheck)) return null;
         if (whiteInCheck) turn = 'w';
         else if (blackInCheck) turn = 'b';
         return [placement, turn, ...rest].join(' ');
+    }
+
+    // --------------------------------------------------------------- chess960
+    // A Chess960 side may castle with a rook while its king and that rook
+    // still stand where they started, so the rights come from the game's
+    // start position, which each site's game API names. One lookup per game.
+
+    // Shredder-FEN rights (rook file letters, outer rook first)
+    function castling960(placement, startFen) {
+        let now = parsePlacement(placement), start = parsePlacement(startFen.split(' ')[0]);
+        if (!now || !start) return '-';
+        let rights = '';
+        for (let [row, king, rook, fileA] of [[7, 'K', 'R', 65], [0, 'k', 'r', 97]]) {
+            let kingFile = start[row].indexOf(king);
+            if (kingFile < 0 || now[row][kingFile] !== king) continue;
+            for (let f = 7; f >= 0; f--) {
+                if (start[row][f] === rook && now[row][f] === rook) rights += String.fromCharCode(fileA + f);
+            }
+        }
+        return rights || '-';
+    }
+
+    // The game to ask about, as { id, url, read }: read takes the response and
+    // gives the start FEN, or null for a game that is not Chess960
+    function game960() {
+        if (SITE === 'lichess') {
+            // lichess names the variant on the page, so other games need no lookup;
+            // the analysis board, studies and broadcasts are not games
+            if (!document.querySelector('.round__app.variant-chess960, main.analyse.variant-chess960')) return null;
+            if (/^\/(analysis|study|broadcast)\b/.test(location.pathname)) return null;
+            let id = location.pathname.match(/^\/(?:game\/)?(\w{8})/)?.[1];
+            return id && {
+                id,
+                url: '/game/export/' + id + '?moves=false',
+                read: r => r.text().then(pgn => pgn.match(/\[FEN "([^"]+)"\]/)?.[1] || null)
+            };
+        }
+        if (SITE === 'chesscom') {
+            let m = location.pathname.match(/\/game\/(?:(live|daily)\/)?(\d+)/);
+            return m && {
+                id: m[2],
+                url: '/callback/' + (m[1] || 'live') + '/game/' + m[2],
+                read: r => r.json().then(d => d?.game?.type === 'chess960' && d.game.initialSetup || null)
+            };
+        }
+        return null;
+    }
+
+    // A few tries a few seconds apart, a minute after "too many requests";
+    // a game that never answers is treated as standard chess
+    const START960_TRIES = 3;
+    const START960_RETRY_MS = 5000;
+    const START960_BUSY_MS = 60000;
+    let start960 = { id: '', fen: null, known: false, inFlight: false, tries: 0, retryAt: 0 };
+
+    // The current game's Chess960 start FEN; null for other games and until it is known
+    function chess960Start() {
+        if (SITE === 'endgame') return egSecret.start960;
+        let game = game960();
+        if (!game) return null;
+        if (start960.id !== game.id) start960 = { id: game.id, fen: null, known: false, inFlight: false, tries: 0, retryAt: 0 };
+        let state = start960;
+        if (!state.known && !state.inFlight && Date.now() >= state.retryAt) {
+            state.inFlight = true;
+            state.retryAt = Date.now() + START960_RETRY_MS;
+            fetch(game.url)
+                .then(r => {
+                    if (r.status === 404) return null;
+                    if (r.status === 429) state.retryAt = Date.now() + START960_BUSY_MS;
+                    return r.ok ? game.read(r) : undefined;
+                })
+                .catch(() => undefined)
+                .then(fen => {
+                    if (fen !== undefined) state.fen = fen;
+                    state.known = fen !== undefined || ++state.tries >= START960_TRIES;
+                })
+                .finally(() => { state.inFlight = false; });
+        }
+        return state.fen;
     }
 
     // --------------------------------------------------------------- analyzer
@@ -893,13 +1123,23 @@
                 render(flipped);
             }
 
-            if (pos.fen === fen) return;
+            // Chess960 castling rights come from the start position; pos.fen
+            // itself stays as read, since the relay sends it on
+            let rules = pos.rules || STANDARD;
+            let start = rules.uci === 'chess' ? chess960Start() : null;
+            let posFen = pos.fen;
+            if (start) {
+                let f = posFen.split(' ');
+                f[2] = castling960(f[0], start);
+                posFen = f.join(' ');
+            }
+            if (posFen === fen) return;
 
-            fen = pos.fen;
+            fen = posFen;
             moves = []; ponder = "";
             render(pos.flipped);
-            let playable = playableFen(fen);
-            if (playable) analyzeWorker(playable, pos.flipped);
+            let playable = playableFen(fen, rules);
+            if (playable) analyzeWorker(playable, pos.flipped, rules.uci, !!start);
             else idleEngine();
         }, 30);
     }
@@ -1153,8 +1393,14 @@
         return true;
     }
 
-    function refreshRelayMoves(fen) {
+    // Variant games stay out of the relay: the web app reads every position as standard chess
+    function readRelayBoard() {
         let pos = readBoard();
+        return pos && (pos.rules || STANDARD) === STANDARD ? pos : null;
+    }
+
+    function refreshRelayMoves(fen) {
+        let pos = readRelayBoard();
         if (!pos || pos.fen !== fen) return;
         if (publishRelayPosition(pos) && isGameOver()) sendRelayEnd();
     }
@@ -1167,7 +1413,7 @@
 
     function relayTick() {
         try {
-            let pos = readBoard();
+            let pos = readRelayBoard();
             if (!pos) return;
 
             if (pos.board !== relayBoard) {
@@ -1210,7 +1456,7 @@
     });
     queueRelayTick();
     setInterval(() => {
-        const pos = readBoard();
+        const pos = readRelayBoard();
         if (pos && !isGameOver()) publishRelayPosition(pos, true);
     }, 2000);
 

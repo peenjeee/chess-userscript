@@ -42,6 +42,19 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   (declared in the header — approve the `chess.0xpnj.dev` permission if your
   userscript manager asks) and caches the 113MB in IndexedDB, so it downloads
   once ever, not once per page.
+- **lichess variants** (King of the Hill, Three-Check, Antichess, Atomic,
+  Horde, Racing Kings, Crazyhouse) run on multi-variant Stockfish 10
+  ([lichess-org/stockfish.js](https://github.com/lichess-org/stockfish.js),
+  GPLv3, ~0.6MB) fetched from jsDelivr at a pinned version and checked
+  against its SHA-256 (approve the `cdn.jsdelivr.net` permission if asked).
+  Crazyhouse pockets and three-check counters are read from the page; a
+  suggested drop shows as a ringed square with the piece letter. Variant
+  games are not relayed, since the web app analyzes standard chess only.
+- **Chess960** (all three sites): the engine runs in Chess960 mode, with
+  castling rights taken from the game's start position (looked up once per
+  game from the site's own game API). A suggested castle is drawn to the
+  king's landing square, or as the rook's move when the king already stands
+  there.
 - **endgame.ai**: the script runs the same Stockfish 18 NNUE build as on
   chess.com (cached in IndexedDB) without site-engine fallback. In **Secret
   Queen** games, hidden queens (own square + revealed pieces from API/DOM badges)
