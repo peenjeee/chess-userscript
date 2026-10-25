@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.7
+// @version      3.8
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -390,13 +390,13 @@
     // The variants server draws its own board: pieces are divs with data-piece
     // and data-color (5 White, 6 Black, 7 stone) placed by transform in square
     // units, and each banked piece is one more div off the board's edge.
-    function readBoardCV() {
+    function readBoardCV(relay = false) {
         let b = document.querySelector('.TheBoard-layers');
         let slug = location.pathname.match(/^\/variants\/([^/]+)/)?.[1] || '';
         let rules = CC_VARIANTS[slug];
         let idle = note => ({ board: b, flipped: false, fen: '', note });
         if (!rules) return idle("Variant not supported: " + (slug || 'this board'));
-        if (rules.uci !== 'chess' && !sf10Plays(rules.uci) && !fsfUsable()) {
+        if (!relay && rules.uci !== 'chess' && !sf10Plays(rules.uci) && !fsfUsable()) {
             return idle((inExtension() ? "Variant engine unavailable: " : "Variant needs the extension: ") + slug);
         }
         let size = b.getBoundingClientRect().width / 8;
@@ -708,7 +708,7 @@
     }
 
     // chess.com's variants server has its own board; everywhere else on chess.com it is wc-chess-board
-    let readBoardChesscom = () => document.querySelector('.TheBoard-layers') ? readBoardCV() : readBoardCC();
+    let readBoardChesscom = relay => document.querySelector('.TheBoard-layers') ? readBoardCV(relay) : readBoardCC();
     let readBoard = { lichess: readBoardLI, endgame: readBoardEG, chesscom: readBoardChesscom }[SITE];
 
     // ----------------------------------------------------------------- arrows
@@ -1320,21 +1320,31 @@ if (globalThis.name !== 'em-pthread') {
     const CV_READ = 'chess-analyzer-variants-read';
     const CV_GAME = 'chess-analyzer-variants-game';
 
-    // Runs in the page. Moves without squares (a resignation, a timeout) are left out.
+    // Runs in the page. Each move is [from, to, promotion, duck square, FEN
+    // after]: a duck chess turn is the move and then the duck, and the FEN
+    // after a move is only kept where the relay needs it (a Seirawan piece
+    // brought in, the end of Setup Chess's drops). Moves without squares (a
+    // resignation, a timeout, a side done with its setup) are left out.
     function variantsGameReader(readEvent, gameEvent) {
         document.addEventListener(readEvent, () => {
             let game = null;
             try {
                 let stores = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s;
                 let g = stores.get('game');
+                let start = g.startFen || '';
+                let keepFen = m => /seirawanDrops/.test(start) || (/setupPoints/.test(start) && /^@/.test(m.from));
                 game = {
                     gameNr: g.gameNr,
-                    startFen: g.startFen,
+                    startFen: start,
                     gameOver: !!g.gameOver,
                     players: (g.players || []).map(p => (p && p.username) || ''),
                     moves: (stores.get('moves').moves || [])
-                        .filter(m => m.from && m.to && !m.isIllegal && !(m.inVariation >= 0))
-                        .map(m => [m.from, m.to, m.promoteTo || ''])
+                        .filter(m => !m.isIllegal && !(m.inVariation >= 0))
+                        .map(m => {
+                            let [move, duck] = m.multimoves || [m];
+                            return [move.from || '', move.to || '', move.promoteTo || '', (duck && duck.piece === 'Θ' && duck.to) || '', keepFen(move) ? m.fen || '' : ''];
+                        })
+                        .filter(m => m[0] && m[1])
                 };
             } catch (e) {}
             document.dispatchEvent(new CustomEvent(gameEvent, { detail: JSON.stringify(game) }));
@@ -1360,27 +1370,120 @@ if (globalThis.name !== 'em-pthread') {
         try { return JSON.parse(cvReply); } catch (e) { return null; }
     }
 
+    // The web app's names for the variants-server games it follows, by slug
+    const CV_RELAY = {
+        'chess960': 'chess960', 'crazyhouse': 'crazyhouse', '3-check': 'threeCheck', 'king-of-the-hill': 'kingOfTheHill',
+        'atomic': 'atomic', 'giveaway': 'giveaway', 'horde': 'horde', 'racing-kings': 'racingKings',
+        'no-castling': 'noCastling', 'setup-chess': 'setupChess', 'torpedo': 'torpedo', 'sideways-pawns': 'sidewaysPawns',
+        'petrified': 'petrified', 'paradigm-chess30': 'paradigm', 'seirawan-chess': 'seirawan', 'chaturanga': 'chaturanga',
+        'duck-chess': 'duck'
+    };
+    // The server's piece letters that Fairy-Stockfish writes differently
+    const CV_LETTERS = { 'chaturanga': { I: 'B', F: 'Q' }, 'paradigm-chess30': { 'Δ': 'B' } };
+
     // The server writes a two-player game on its four-player 14x14 grid: rows
     // from the top, cells split by commas (x off the board, a number for that
-    // many empty squares, else a seat and a piece, 0 White and 2 Black, with d
-    // in front of a dead piece), then fields split by "-", the seat to move
-    // first. The 8x8 board is files d-k of ranks 11 down to 4.
-    function placement8x8(fen) {
+    // many empty squares, Θ the duck, else a seat and a piece, 0 White and 2
+    // Black, with d in front of a dead piece), then fields split by "-", the
+    // seat to move first. The 8x8 board is files d-k of ranks 11 down to 4.
+    function placement8x8(fen, letters = {}) {
         let rows = fen.split('-')[0].split('/');
         if (rows.length !== 14) return null;
         let ranks = [];
         for (let row of rows.slice(3, 11)) {
             let cells = [];
             for (let c of row.split(',')) {
-                let m = c.match(/^d?([02])([PNBRQK])$/);
+                let m = c.match(/^d?([02])(.)$/u);
+                let letter = m && (letters[m[2]] || m[2]);
                 if (/^\d+$/.test(c)) for (let k = 0; k < +c; k++) cells.push('1');
-                else cells.push(m ? (m[1] === '0' ? m[2] : m[2].toLowerCase()) : c === 'x' ? 'x' : '?');
+                else if (c === 'Θ') cells.push('*');
+                else cells.push(m && /^[A-Z]$/.test(letter) ? (m[1] === '0' ? letter : letter.toLowerCase()) : c === 'x' ? 'x' : '?');
             }
             let rank = cells.slice(3, 11);
             if (cells.length !== 14 || rank.some(c => c === 'x' || c === '?')) return null;
             ranks.push(rank.join('').replace(/1+/g, m => m.length));
         }
         return ranks.join('/');
+    }
+
+    // The fields after the board: seat to move, seats out, kingside and
+    // queenside castling per seat, points, halfmove clock, then JSON
+    function cvFields(fen) {
+        let parts = fen.split('-');
+        let json = {};
+        try { json = JSON.parse(parts.slice(7).join('-')); } catch (e) {}
+        let list = i => { try { return JSON.parse(parts[i]); } catch (e) { return []; } };
+        return { turn: parts[1] === '2' ? 'b' : 'w', kingside: list(3), queenside: list(4), json };
+    }
+
+    // Standard castling rights a seat still has, for a king and rooks on their squares
+    function cvCastling(placement, fields) {
+        let rows = placement.split('/').map(r => r.replace(/\d/g, d => '1'.repeat(+d)));
+        let rights = '';
+        for (let [seat, row, k, r, K, Q] of [[0, 7, 'K', 'R', 'K', 'Q'], [2, 0, 'k', 'r', 'k', 'q']]) {
+            if (rows[row][4] !== k) continue;
+            if (fields.kingside[seat] && rows[row][7] === r) rights += K;
+            if (fields.queenside[seat] && rows[row][0] === r) rights += Q;
+        }
+        return rights;
+    }
+
+    // Banked pieces, "rPx3" for three white pawns
+    function cvBank(fields, letters) {
+        let bank = fields.json.bank || [];
+        let side = (seat, upper) => (bank[seat] || '').split(',').filter(Boolean).map(t => {
+            let m = /^[a-z](.)(?:x(\d+))?$/u.exec(t);
+            let letter = m ? (letters[m[1]] || m[1]) : '';
+            return (upper ? letter.toUpperCase() : letter.toLowerCase()).repeat(+(m?.[2] || 1));
+        }).join('');
+        return side(0, true) + side(2, false);
+    }
+
+    // A game's start as a FEN in Fairy-Stockfish's notation: pockets in
+    // brackets, remaining checks, Chess960 rook files, and the files of the
+    // Seirawan pieces that may still bring a banked piece in
+    function cvStartFen(slug, fen, letters) {
+        let placement = placement8x8(fen, letters);
+        if (!placement) return null;
+        let f = cvFields(fen);
+        let castling = slug === 'chess960' ? castling960(placement, placement)
+            : slug === 'no-castling' || slug === 'setup-chess' ? '' : cvCastling(placement, f);
+        let pockets = '';
+        if (slug === 'crazyhouse') pockets = '[' + cvBank(f, letters) + ']';
+        if (slug === 'seirawan-chess') {
+            pockets = '[' + cvBank(f, letters) + ']';
+            let gates = f.json.seirawanDrops || [];
+            let files = (seat, upper) => (gates[seat] || []).map(sq => square8x8(sq)?.[0]).filter(c => c && !'aeh'.includes(c))
+                .map(c => upper ? c.toUpperCase() : c).join('');
+            castling = castling.replace(/[kq]/g, '') + files(0, true) + castling.replace(/[KQ]/g, '') + files(2, false);
+        }
+        let lives = f.json.lives || [3, 3, 3, 3];
+        let checks = slug === '3-check' ? lives[0] + '+' + lives[2] + ' ' : '';
+        return `${placement}${pockets} ${f.turn} ${castling || '-'} - ${checks}0 1`;
+    }
+
+    // One move as UCI. A drop names its piece ("@0_rP" from the bank); a duck
+    // chess turn is the move, then where the duck goes; a Seirawan piece
+    // brought in shows on the square its piece left in the position after.
+    function cvUci(slug, move, letters) {
+        let [from, to, promotion, duck, after] = move;
+        let target = square8x8(to);
+        if (!target) return null;
+        let drop = /^@\d_.(.)$/u.exec(from);
+        if (drop) return (letters[drop[1]] || drop[1]).toUpperCase() + '@' + target;
+        let source = square8x8(from);
+        if (!source) return null;
+        let uci = source + target + (promotion ? (letters[promotion] || promotion).toLowerCase() : '');
+        if (duck) {
+            let duckTo = square8x8(duck);
+            return duckTo ? uci + ',' + target + duckTo : null;
+        }
+        if (slug === 'seirawan-chess' && after) {
+            let rows = placement8x8(after, letters)?.split('/').map(r => r.replace(/\d/g, d => '1'.repeat(+d)));
+            let gated = rows?.[8 - +source[1]]?.[source.charCodeAt(0) - 97];
+            if (gated && /^[HEhe]$/.test(gated)) uci += gated.toLowerCase();
+        }
+        return uci;
     }
 
     // A square of that grid on the 8x8 board: g4 is d1
@@ -1390,27 +1493,37 @@ if (globalThis.name !== 'em-pthread') {
         return file >= 0 && file < 8 && rank >= 1 && rank <= 8 ? String.fromCharCode(97 + file) + rank : null;
     }
 
-    // The Chess960 game a variants page shows: its start FEN and its moves as
-    // UCI, a castle going from the king to its rook as the server writes it;
-    // null on other pages and while the game loads
-    function variants960() {
-        let nr = location.pathname.match(/^\/variants\/chess960\/game\/(\d+)/)?.[1];
+    // The game a variants page shows, read from the page's store
+    function variantsPageGame() {
+        let nr = location.pathname.match(/^\/variants\/[^/]+\/game\/(\d+)/)?.[1];
         let g = nr && readVariantsGame();
-        if (!g || String(g.gameNr) !== nr) return null;
-        let placement = placement8x8(g.startFen || '');
-        let ucis = g.moves.map(([from, to, promotion]) => {
-            let a = square8x8(from), b = square8x8(to);
-            return a && b ? a + b + promotion.toLowerCase() : null;
-        });
-        if (!placement || ucis.includes(null)) return null;
-        let turn = g.startFen.split('-')[1] === '2' ? 'b' : 'w';
-        return {
-            start: `${placement} ${turn} ${castling960(placement, placement)} - 0 1`,
-            ucis,
-            over: g.gameOver,
-            white: g.players[0] || '',
-            black: g.players[2] || ''
-        };
+        return g && String(g.gameNr) === nr ? g : null;
+    }
+
+    // The game a variants page shows, for the web app: its variant, its start
+    // FEN and its moves as UCI (a Chess960 castle goes from the king to its
+    // rook, as the server writes it). Setup Chess starts from the position its
+    // drops built, once both sides are done. Null on other pages, for other
+    // variants and while the game loads.
+    function variantsGame() {
+        let slug = location.pathname.match(/^\/variants\/([^/]+)\//)?.[1];
+        let variant = CV_RELAY[slug];
+        let g = variant && variantsPageGame();
+        if (!g) return null;
+        let letters = CV_LETTERS[slug] || {};
+        let start = g.startFen, moves = g.moves;
+        if (slug === 'setup-chess') {
+            let n = 0;
+            while (n < moves.length && moves[n][0].startsWith('@')) n++;
+            let done = n < moves.length || /"setupComplete":\[true,\w+,true/.test(moves[n - 1]?.[4] || '');
+            if (!n || !done || !moves[n - 1][4]) return null;
+            start = moves[n - 1][4];
+            moves = moves.slice(n);
+        }
+        let fen = cvStartFen(slug, start || '', letters);
+        let ucis = moves.map(m => cvUci(slug, m, letters));
+        if (!fen || ucis.includes(null)) return null;
+        return { variant, start: fen, ucis, over: g.gameOver, white: g.players[0] || '', black: g.players[2] || '' };
     }
 
     // The game to ask about, as { id, url, read }: read takes the response and
@@ -1450,7 +1563,10 @@ if (globalThis.name !== 'em-pthread') {
     // The current game's Chess960 start FEN; null for other games and until it is known
     function chess960Start() {
         if (SITE === 'endgame') return egSecret.start960;
-        if (SITE === 'chesscom' && location.pathname.startsWith('/variants/')) return variants960()?.start || null;
+        if (SITE === 'chesscom' && location.pathname.startsWith('/variants/')) {
+            let cv = variantsGame();
+            return cv?.variant === 'chess960' ? cv.start : null;
+        }
         let game = game960();
         if (!game) return null;
         if (start960.id !== game.id) start960 = { id: game.id, fen: null, known: false, inFlight: false, tries: 0, retryAt: 0 };
@@ -1580,7 +1696,7 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     function isGameOver() {
-        if (SITE === 'chesscom' && location.pathname.startsWith('/variants/')) return !!variants960()?.over;
+        if (SITE === 'chesscom' && location.pathname.startsWith('/variants/')) return !!variantsPageGame()?.gameOver;
         if (SITE === 'chesscom') {
             return !!document.querySelector('.game-over-modal-content, .game-over-header-component, [class*="game-over-modal"]');
         }
@@ -1776,8 +1892,8 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     function publishRelayPosition(pos, force = false) {
-        // a Chess960 game on the variants server goes as its start and its UCI moves
-        let cv = pos.rules === CC_VARIANTS['chess960'] ? variants960() : null;
+        // a variants-server game goes as its variant, its start and its UCI moves
+        let cv = SITE === 'chesscom' && location.pathname.startsWith('/variants/') ? variantsGame() : null;
         let playedMoves = SITE === 'chesscom' && !cv ? readMovesCC() : [];
         if (SITE === 'chesscom' && !cv) playedMoves = keepFullRelayHistory(playedMoves);
         let movesKey = (cv ? cv.ucis : playedMoves).join(' ');
@@ -1789,18 +1905,19 @@ if (globalThis.name !== 'em-pthread') {
         let players = cv ? { white: cv.white, black: cv.black, bottom: pos.flipped ? 'black' : 'white' } : readPlayers(pos.flipped);
         // Lets the web app load the finished game from endgame.ai by id
         let gameId = SITE === 'endgame' ? location.pathname.match(/^\/game\/([\w-]+)/)?.[1] : undefined;
-        let variantFields = cv ? { variant: 'chess960', startFen: cv.start, ucis: cv.ucis } : {};
+        let variantFields = cv ? { variant: cv.variant, startFen: cv.start, ucis: cv.ucis } : {};
         publish({ v: 1, type: 'pos', site: SITE, gameId, fen: pos.fen, moves: playedMoves, ...variantFields, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
         return true;
     }
 
     // Variant games stay out of the relay, since the web app reads a board as
-    // standard chess, except a variants-server Chess960 game sent with its moves
+    // standard chess, except a variants-server game sent with its variant and
+    // moves. That one goes even where this script has no engine for its variant.
     function readRelayBoard() {
-        let pos = readBoard();
+        let pos = readBoard(true);
         if (!pos || pos.note) return null;
         let rules = pos.rules || STANDARD;
-        return rules === STANDARD || (rules === CC_VARIANTS['chess960'] && variants960()) ? pos : null;
+        return rules === STANDARD || variantsGame() ? pos : null;
     }
 
     function refreshRelayMoves(fen) {

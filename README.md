@@ -50,8 +50,9 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   ([lichess-org/stockfish.js](https://github.com/lichess-org/stockfish.js),
   GPLv3, ~0.6MB).
   Crazyhouse pockets and three-check counters are read from the page; a
-  suggested drop shows as a ringed square with the piece letter. Variant
-  games are not relayed, since the web app analyzes standard chess only.
+  suggested drop shows as a ringed square with the piece letter. lichess
+  variant games are not relayed: the web app follows them straight from
+  lichess by username.
 - **chess.com variants** (the 4 Player & Variants server): Crazyhouse,
   3 Check, King of the Hill, Atomic, Giveaway, Horde and Racing Kings run on
   multi-variant Stockfish 10, since chess.com pages cannot run the threaded
@@ -64,7 +65,9 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   extension". Banked pieces, the side to move and the checks given are
   read from the board and its move list. Any other variant there (Fog of
   War, Spell Chess, Blindfold, 4 Player, custom rules) shows "Variant not
-  supported" instead of arrows.
+  supported" instead of arrows. Games of the supported variants, the
+  Fairy-Stockfish ones included, are relayed with their variant, start
+  position and moves, so the web app follows, analyzes and reviews them.
 - **Chess960** (all three sites): the engine runs in Chess960 mode, with
   castling rights taken from the game's start position (looked up once per
   game from the site's own game API; on chess.com's variants server, read
