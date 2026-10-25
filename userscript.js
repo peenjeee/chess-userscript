@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -45,7 +45,9 @@
     // variant: the build lichess's own analysis uses (github.com/lichess-org/
     // stockfish-web, AGPLv3; Fairy-Stockfish is GPLv3), pinned and checked the
     // same way. Each network comes from lichess's asset host and is named
-    // after the start of its own SHA-256.
+    // after the start of its own SHA-256. Pages without threads (chess.com)
+    // get the same engine from the extension's offscreen document, which is
+    // cross-origin isolated; the userscript keeps SF10 there.
     const FSF_JS = "https://cdn.jsdelivr.net/npm/@lichess-org/stockfish-web@0.5.0/fsf_14.js";
     const FSF_WASM = "https://cdn.jsdelivr.net/npm/@lichess-org/stockfish-web@0.5.0/fsf_14.wasm";
     const FSF_SHA256 = {
@@ -901,10 +903,32 @@ if (globalThis.name !== 'em-pthread') {
         return bytes;
     }
 
-    let fsfUsable = () => !fsfBroken && self.crossOriginIsolated === true && typeof SharedArrayBuffer === 'function';
+    let threadsHere = () => self.crossOriginIsolated === true && typeof SharedArrayBuffer === 'function';
+    // a userscript manager can show its own runtime id to the script, so GM rules it out
+    let inExtension = () => !hasGM && typeof chrome === 'object' && !!chrome.runtime?.id;
+    let fsfUsable = () => !fsfBroken && (threadsHere() || inExtension());
+
+    // A port to the extension's offscreen Fairy-Stockfish (engine/offscreen.js),
+    // shaped like a worker. It loads the variant's network after it starts.
+    async function createOffscreenWorker(variant, nnue) {
+        if (!await chrome.runtime.sendMessage('open-engine')) throw new Error('offscreen engine did not open');
+        let port = chrome.runtime.connect({ name: 'fsf' });
+        let w = {
+            onmessage: null,
+            onerror: null,
+            // a port that just closed reports it through onDisconnect
+            postMessage: line => { try { port.postMessage(line); } catch (e) { } },
+            terminate: () => port.disconnect()
+        };
+        port.onMessage.addListener(line => w.onmessage?.({ data: line }));
+        port.onDisconnect.addListener(() => w.onerror?.(new Event('error')));
+        port.postMessage({ variant, nnue });
+        return w;
+    }
 
     async function createFsfWorker(variant) {
         let rules = Object.values(LI_VARIANTS).find(v => v.uci === variant);
+        if (!threadsHere()) return createOffscreenWorker(variant, rules.nnue);
         let [src, wasm, nnue] = await Promise.all([fetchText(FSF_JS), fetchBytes(FSF_WASM), loadNnue(rules.nnue)]);
         if (await sha256(src) !== FSF_SHA256.js || await sha256(wasm) !== FSF_SHA256.wasm) {
             throw new Error('Fairy-Stockfish files do not match their pinned hashes');
@@ -1038,7 +1062,8 @@ if (globalThis.name !== 'em-pthread') {
             // the analyzer stopped, or a game of another variant came up, while loading
             if (!iv || variant !== engineVariant) { w.terminate(); return; }
             engineFsf = fsf;
-            startWorker(w, usingFallback ? 20000 : fsf ? 60000 : 300000);
+            // the offscreen engine downloads its network after it starts, so it gets the long wait
+            startWorker(w, usingFallback ? 20000 : fsf && threadsHere() ? 60000 : 300000);
         } catch (e) {
             // a Fairy-Stockfish that cannot load leaves the variants to SF10
             if (fsf) fsfBroken = true;

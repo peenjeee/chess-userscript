@@ -60,7 +60,9 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
 - **chess.com variants** (the 4 Player & Variants server): Crazyhouse,
   3 Check, King of the Hill, Atomic, Giveaway and Horde run on
   multi-variant Stockfish 10, since chess.com pages cannot run the threaded
-  Fairy-Stockfish. Banked pieces, the side to move and the checks given are
+  Fairy-Stockfish. The extension version runs Fairy-Stockfish with the
+  variant's NNUE network there too, from its own offscreen page, which a
+  userscript cannot have. Banked pieces, the side to move and the checks given are
   read from the board and its move list. Any other variant there (Fog of
   War, Duck Chess, Spell Chess, 4 Player, custom rules) shows "Variant not
   supported" instead of arrows.
