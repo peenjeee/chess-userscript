@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -322,6 +322,94 @@
         };
     }
 
+    // chess.com's variants server, by the slug in /variants/<slug>/game/<id>;
+    // its rules for these match lichess's. Any other slug, custom rules and
+    // four-player boards included, is reported as not supported.
+    const CC_VARIANTS = {
+        'crazyhouse': LI_VARIANTS.crazyhouse,
+        '3-check': LI_VARIANTS.threeCheck,
+        'king-of-the-hill': LI_VARIANTS.kingOfTheHill,
+        'atomic': LI_VARIANTS.atomic,
+        'giveaway': LI_VARIANTS.antichess,
+        'horde': LI_VARIANTS.horde
+    };
+
+    // The moves played so far, as SAN, from the variants server's move list
+    function movesCV() {
+        let list = document.querySelector('[class*=moves-list]')?.parentElement;
+        if (!list) return [];
+        return [...list.querySelectorAll('span')]
+            .filter(s => !s.children.length)
+            .map(s => s.textContent.trim())
+            .filter(t => /^(@?[NBRQKP]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?|O-O(-O)?)[+#]?$/.test(t));
+    }
+
+    // The variants server draws its own board: pieces are divs with data-piece
+    // and data-color (5 White, 6 Black) placed by transform in square units,
+    // and each banked crazyhouse piece is one more div off the board's edge.
+    function readBoardCV() {
+        let b = document.querySelector('.TheBoard-layers');
+        let slug = location.pathname.match(/^\/variants\/([^/]+)/)?.[1] || '';
+        let rules = CC_VARIANTS[slug];
+        if (!rules) return { board: b, flipped: false, fen: '', unsupported: slug || 'this board' };
+        let size = b.getBoundingClientRect().width / 8;
+        if (!size) return null;
+        // the bottom player box is player 0 (White) or 2 (Black)
+        let flipped = document.querySelector('.playerbox-bottom [data-player]')?.dataset.player === '2';
+
+        let grid = {}, pocket = { w: '', b: '' };
+        for (let p of b.querySelectorAll('.TheBoard-pieces .piece')) {
+            let m = (p.style.transform || '').match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
+            let color = { 5: 'w', 6: 'b' }[p.dataset.color];
+            let type = (p.dataset.piece || '').toLowerCase();
+            if (!m || !color || type.length !== 1 || !'pnbrqk'.includes(type)) continue;
+            let col = Math.round(+m[1] / size), row = Math.round(+m[2] / size);
+            if (col < 0 || col > 7) { pocket[color] += type; continue; }
+            if (row < 0 || row > 7) continue;
+            grid[(flipped ? 8 - col : col + 1) + ',' + (flipped ? row + 1 : 8 - row)] = color + type;
+        }
+        if (Object.keys(grid).length < 2) return null;
+
+        // The side to move has the bright clock; when neither runs, the number
+        // of moves played says whose turn it is
+        let sans = movesCV();
+        let running = [...document.querySelectorAll('.playerbox-component')]
+            .find(x => /brightness\(100%\)/.test(x.querySelector('.clock-component')?.getAttribute('style') || ''));
+        let player = running?.querySelector('[data-player]')?.dataset.player;
+        let turn = player === '0' ? 'w' : player === '2' ? 'b' : sans.length % 2 ? 'b' : 'w';
+
+        let f = "";
+        for (let r = 8; r >= 1; r--) {
+            if (r < 8) f += "/";
+            for (let c = 1; c <= 8; c++) {
+                let pc = grid[c + ',' + r];
+                f += pc ? (pc[0] === 'w' ? pc[1].toUpperCase() : pc[1]) : "1";
+            }
+        }
+        let castling = "";
+        if (rules.castling && grid['5,1'] === 'wk') {
+            if (grid['8,1'] === 'wr') castling += "K";
+            if (grid['1,1'] === 'wr') castling += "Q";
+        }
+        if (rules.castling && grid['5,8'] === 'bk') {
+            if (grid['8,8'] === 'br') castling += "k";
+            if (grid['1,8'] === 'br') castling += "q";
+        }
+        let banks = rules.uci === 'crazyhouse' ? "[" + pocket.w.toUpperCase() + pocket.b + "]" : "";
+        // three-check: the checks each side has left, from the "+" moves in the list
+        let checks = "";
+        if (rules.uci === '3check') {
+            let given = side => sans.filter((s, i) => i % 2 === side && /[+#]$/.test(s)).length;
+            checks = Math.max(0, 3 - given(0)) + "+" + Math.max(0, 3 - given(1)) + " ";
+        }
+        return {
+            board: b,
+            flipped,
+            rules,
+            fen: f.replace(/1+/g, m => m.length) + banks + " " + turn + " " + (castling || "-") + " - " + checks + "0 1"
+        };
+    }
+
     // Toast notification for in-game tactical alerts
     function showToast(msg, bg = '#1e1b4b', border = '#6366f1', duration = 4000) {
         let el = document.getElementById('sa-toast');
@@ -557,7 +645,9 @@
         };
     }
 
-    let readBoard = { lichess: readBoardLI, endgame: readBoardEG, chesscom: readBoardCC }[SITE];
+    // chess.com's variants server has its own board; everywhere else on chess.com it is wc-chess-board
+    let readBoardChesscom = () => document.querySelector('.TheBoard-layers') ? readBoardCV() : readBoardCC();
+    let readBoard = { lichess: readBoardLI, endgame: readBoardEG, chesscom: readBoardChesscom }[SITE];
 
     // ----------------------------------------------------------------- arrows
 
@@ -1200,6 +1290,18 @@ if (globalThis.name !== 'em-pthread') {
         iv = setInterval(() => {
             let pos = readBoard();
             if (!pos) return;
+            // a variant no engine here plays gets no arrows rather than wrong ones
+            if (pos.unsupported) {
+                let note = "Variant not supported: " + pos.unsupported;
+                if (fen !== note) {
+                    fen = note;
+                    idleEngine();
+                    moves = []; ponder = "";
+                    document.getElementById("sa-arrows")?.remove();
+                    btn.innerHTML = note;
+                }
+                return;
+            }
             ensureOverlay(pos.board);
 
             // Flipping keeps the FEN, so redraw for the new orientation without restarting the search.
@@ -1482,7 +1584,7 @@ if (globalThis.name !== 'em-pthread') {
     // Variant games stay out of the relay: the web app reads every position as standard chess
     function readRelayBoard() {
         let pos = readBoard();
-        return pos && (pos.rules || STANDARD) === STANDARD ? pos : null;
+        return pos && !pos.unsupported && (pos.rules || STANDARD) === STANDARD ? pos : null;
     }
 
     function refreshRelayMoves(fen) {
@@ -1551,13 +1653,14 @@ if (globalThis.name !== 'em-pthread') {
     function mountUI() {
         // Analyzer button
         if (!document.getElementById("sa-wrap")) {
-            if (SITE === 'chesscom') {
+            let variantsBoard = SITE === 'chesscom' && document.querySelector('.TheBoard-layers');
+            if (SITE === 'chesscom' && !variantsBoard) {
                 let host = document.querySelector(".board-layout-main");
                 if (host) {
                     host.insertAdjacentHTML('afterbegin', `<div id="sa-wrap" style="display:flex;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;"><button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button></div>`);
                     document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
                 }
-            } else if (SITE === 'endgame' ? findBoardEG() : document.querySelector('cg-board')) {
+            } else if (variantsBoard || (SITE === 'endgame' ? findBoardEG() : SITE === 'lichess' && document.querySelector('cg-board'))) {
                 document.body.insertAdjacentHTML('beforeend', `<div id="sa-wrap" style="position:fixed;bottom:12px;left:12px;z-index:99999;"><button id="sa-btn" style="background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 14px;font:13px sans-serif;cursor:pointer">Start Analyzer (Hotkey: A)</button></div>`);
                 document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
             }

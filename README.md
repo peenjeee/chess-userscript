@@ -57,6 +57,13 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   Crazyhouse pockets and three-check counters are read from the page; a
   suggested drop shows as a ringed square with the piece letter. Variant
   games are not relayed, since the web app analyzes standard chess only.
+- **chess.com variants** (the 4 Player & Variants server): Crazyhouse,
+  3 Check, King of the Hill, Atomic, Giveaway and Horde run on
+  multi-variant Stockfish 10, since chess.com pages cannot run the threaded
+  Fairy-Stockfish. Banked pieces, the side to move and the checks given are
+  read from the board and its move list. Any other variant there (Fog of
+  War, Duck Chess, Spell Chess, 4 Player, custom rules) shows "Variant not
+  supported" instead of arrows.
 - **Chess960** (all three sites): the engine runs in Chess960 mode, with
   castling rights taken from the game's start position (looked up once per
   game from the site's own game API). A suggested castle is drawn to the
