@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -326,7 +326,8 @@
 
     // chess.com's variants server, by the slug in /variants/<slug>/game/<id>.
     // The lichess ones keep lichess's rules; the rest match Fairy-Stockfish's
-    // variant of that name. On top of the keys above: pieces maps the server's
+    // variant of that name, with the Fairy-Stockfish project's own network where
+    // one exists (Paradigm has none). On top of the keys above: pieces maps the server's
     // own piece names to FEN letters, walls turns its stones (colour 7) into
     // walls, and setup waits until the setup drops are over. No Castling and
     // Setup Chess are standard chess for SF18 once the board is read. Any other
@@ -341,15 +342,15 @@
         'racing-kings': LI_VARIANTS.racingKings,
         'no-castling': { ...STANDARD, castling: false },
         'setup-chess': { ...STANDARD, castling: false, setup: true },
-        'torpedo': { ...STANDARD, uci: 'torpedo' },
-        'sideways-pawns': { ...STANDARD, uci: 'pawnsideways' },
+        'torpedo': { ...STANDARD, uci: 'torpedo', nnue: 'torpedo-25da2c94c6cb' },
+        'sideways-pawns': { ...STANDARD, uci: 'pawnsideways', nnue: 'pawnsideways-68b37e5c25b0' },
         // kings cannot capture there, so kings that touch give no check (as in atomic)
-        'petrified': { ...STANDARD, uci: 'petrified', walls: true, check: 'atomic' },
+        'petrified': { ...STANDARD, uci: 'petrified', nnue: 'petrified-fa7e5810f172', walls: true, check: 'atomic' },
         'paradigm-chess30': { ...STANDARD, uci: 'paradigm', pieces: { 'Δ': 'b' } },
         // the server draws a piece under its display name when it has one, else its letter
-        'seirawan-chess': { ...STANDARD, uci: 'seirawan', pieces: { hawk: 'h', H: 'h', seirawanElephant: 'e', E: 'e' } },
+        'seirawan-chess': { ...STANDARD, uci: 'seirawan', nnue: 'seirawan-432c65fe71fc', pieces: { hawk: 'h', H: 'h', seirawanElephant: 'e', E: 'e' } },
         // its ferz and elephant are not the queen and bishop the check test knows
-        'chaturanga': { ...STANDARD, uci: 'chaturanga', pieces: { chariot: 'r', elephant: 'b', I: 'b', F: 'q' }, check: 'none', castling: false }
+        'chaturanga': { ...STANDARD, uci: 'chaturanga', nnue: 'chaturanga-1889e98f8d54', pieces: { chariot: 'r', elephant: 'b', I: 'b', F: 'q' }, check: 'none', castling: false }
     };
 
     // SF10 is lichess's build, so it plays the lichess variants; the others need Fairy-Stockfish
@@ -972,7 +973,7 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     async function createFsfWorker(variant) {
-        // chess.com-only variants have no network: Fairy-Stockfish uses its own evaluation
+        // without a network (Paradigm) Fairy-Stockfish uses its own evaluation
         let rules = [...Object.values(LI_VARIANTS), ...Object.values(CC_VARIANTS)].find(v => v.uci === variant);
         if (!threadsHere()) return createOffscreenWorker(variant, rules.nnue || null);
         let [src, wasm, nnue] = await Promise.all([fetchText(FSF_JS), fetchBytes(FSF_WASM), loadNnue(rules.nnue)]);
@@ -1108,7 +1109,7 @@ if (globalThis.name !== 'em-pthread') {
         }
         engineStarting = true;
         if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~113MB)"
-            : fsf ? "Loading variant engine… (one-time, up to ~59MB)" : "Loading variant engine…";
+            : fsf ? "Loading variant engine… (one-time, up to ~80MB)" : "Loading variant engine…";
         try {
             let w = usingFallback ? new Worker(CC_FALLBACK)
                 : variant === 'chess' ? await createRemoteWorker()
