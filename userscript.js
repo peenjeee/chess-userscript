@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -324,17 +324,50 @@
         };
     }
 
-    // chess.com's variants server, by the slug in /variants/<slug>/game/<id>;
-    // its rules for these match lichess's. Any other slug, custom rules and
-    // four-player boards included, is reported as not supported.
+    // chess.com's variants server, by the slug in /variants/<slug>/game/<id>.
+    // The lichess ones keep lichess's rules; the rest match Fairy-Stockfish's
+    // variant of that name. On top of the keys above: pieces maps the server's
+    // own piece names to FEN letters, walls turns its stones (colour 7) into
+    // walls, and setup waits until the setup drops are over. No Castling and
+    // Setup Chess are standard chess for SF18 once the board is read. Any other
+    // slug, custom rules and four-player boards included, is not supported.
     const CC_VARIANTS = {
         'crazyhouse': LI_VARIANTS.crazyhouse,
         '3-check': LI_VARIANTS.threeCheck,
         'king-of-the-hill': LI_VARIANTS.kingOfTheHill,
         'atomic': LI_VARIANTS.atomic,
         'giveaway': LI_VARIANTS.antichess,
-        'horde': LI_VARIANTS.horde
+        'horde': LI_VARIANTS.horde,
+        'racing-kings': LI_VARIANTS.racingKings,
+        'no-castling': { ...STANDARD, castling: false },
+        'setup-chess': { ...STANDARD, castling: false, setup: true },
+        'torpedo': { ...STANDARD, uci: 'torpedo' },
+        'sideways-pawns': { ...STANDARD, uci: 'pawnsideways' },
+        // kings cannot capture there, so kings that touch give no check (as in atomic)
+        'petrified': { ...STANDARD, uci: 'petrified', walls: true, check: 'atomic' },
+        'paradigm-chess30': { ...STANDARD, uci: 'paradigm', pieces: { 'Δ': 'b' } },
+        // the server draws a piece under its display name when it has one, else its letter
+        'seirawan-chess': { ...STANDARD, uci: 'seirawan', pieces: { hawk: 'h', H: 'h', seirawanElephant: 'e', E: 'e' } },
+        // its ferz and elephant are not the queen and bishop the check test knows
+        'chaturanga': { ...STANDARD, uci: 'chaturanga', pieces: { chariot: 'r', elephant: 'b', I: 'b', F: 'q' }, check: 'none', castling: false }
     };
+
+    // SF10 is lichess's build, so it plays the lichess variants; the others need Fairy-Stockfish
+    let sf10Plays = variant => Object.values(LI_VARIANTS).some(v => v.uci === variant);
+
+    // Seirawan: a piece still on its back-rank start square may bring a banked
+    // piece in on its first move. The castling letters stand for the king and
+    // rooks; the files of the other pieces are added while the bank holds any.
+    function seirawanRights(grid, castling, bank) {
+        let side = (color, rank, rights) => {
+            if (!bank[color]) return rights;
+            for (let [file, type] of [[2, 'n'], [3, 'b'], [4, 'q'], [6, 'b'], [7, 'n']]) {
+                if (grid[file + ',' + rank] === color + type) rights += String.fromCharCode((color === 'w' ? 64 : 96) + file);
+            }
+            return rights;
+        };
+        return side('w', 1, castling.replace(/[kq]/g, '')) + side('b', 8, castling.replace(/[KQ]/g, ''));
+    }
 
     // The moves played so far, as SAN, from the variants server's move list
     function movesCV() {
@@ -347,34 +380,41 @@
     }
 
     // The variants server draws its own board: pieces are divs with data-piece
-    // and data-color (5 White, 6 Black) placed by transform in square units,
-    // and each banked crazyhouse piece is one more div off the board's edge.
+    // and data-color (5 White, 6 Black, 7 stone) placed by transform in square
+    // units, and each banked piece is one more div off the board's edge.
     function readBoardCV() {
         let b = document.querySelector('.TheBoard-layers');
         let slug = location.pathname.match(/^\/variants\/([^/]+)/)?.[1] || '';
         let rules = CC_VARIANTS[slug];
-        if (!rules) return { board: b, flipped: false, fen: '', unsupported: slug || 'this board' };
+        let idle = note => ({ board: b, flipped: false, fen: '', note });
+        if (!rules) return idle("Variant not supported: " + (slug || 'this board'));
+        if (rules.uci !== 'chess' && !sf10Plays(rules.uci) && !fsfUsable()) {
+            return idle((inExtension() ? "Variant engine unavailable: " : "Variant needs the extension: ") + slug);
+        }
         let size = b.getBoundingClientRect().width / 8;
         if (!size) return null;
         // the bottom player box is player 0 (White) or 2 (Black)
         let flipped = document.querySelector('.playerbox-bottom [data-player]')?.dataset.player === '2';
+        let sans = movesCV();
+        // Setup Chess opens with drops until both sides have spent their points
+        if (rules.setup && !/^[^@]/.test(sans[sans.length - 1] || '')) return idle("Waiting for the setup");
 
         let grid = {}, pocket = { w: '', b: '' };
         for (let p of b.querySelectorAll('.TheBoard-pieces .piece')) {
             let m = (p.style.transform || '').match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
-            let color = { 5: 'w', 6: 'b' }[p.dataset.color];
-            let type = (p.dataset.piece || '').toLowerCase();
-            if (!m || !color || type.length !== 1 || !'pnbrqk'.includes(type)) continue;
+            let name = p.dataset.piece || '';
+            let type = rules.pieces?.[name] || (/^[PNBRQK]$/.test(name) ? name.toLowerCase() : null);
+            let color = { 5: 'w', 6: 'b', 7: rules.walls ? '*' : null }[p.dataset.color];
+            if (!m || !color || !type) continue;
             let col = Math.round(+m[1] / size), row = Math.round(+m[2] / size);
-            if (col < 0 || col > 7) { pocket[color] += type; continue; }
-            if (row < 0 || row > 7) continue;
-            grid[(flipped ? 8 - col : col + 1) + ',' + (flipped ? row + 1 : 8 - row)] = color + type;
+            if (color !== '*' && (col < 0 || col > 7)) { pocket[color] += type; continue; }
+            if (row < 0 || row > 7 || col < 0 || col > 7) continue;
+            grid[(flipped ? 8 - col : col + 1) + ',' + (flipped ? row + 1 : 8 - row)] = color === '*' ? '*' : color + type;
         }
         if (Object.keys(grid).length < 2) return null;
 
         // The side to move has the bright clock; when neither runs, the number
         // of moves played says whose turn it is
-        let sans = movesCV();
         let running = [...document.querySelectorAll('.playerbox-component')]
             .find(x => /brightness\(100%\)/.test(x.querySelector('.clock-component')?.getAttribute('style') || ''));
         let player = running?.querySelector('[data-player]')?.dataset.player;
@@ -385,7 +425,7 @@
             if (r < 8) f += "/";
             for (let c = 1; c <= 8; c++) {
                 let pc = grid[c + ',' + r];
-                f += pc ? (pc[0] === 'w' ? pc[1].toUpperCase() : pc[1]) : "1";
+                f += !pc ? "1" : pc === '*' ? '*' : pc[0] === 'w' ? pc[1].toUpperCase() : pc[1];
             }
         }
         let castling = "";
@@ -397,7 +437,9 @@
             if (grid['8,8'] === 'br') castling += "k";
             if (grid['1,8'] === 'br') castling += "q";
         }
-        let banks = rules.uci === 'crazyhouse' ? "[" + pocket.w.toUpperCase() + pocket.b + "]" : "";
+        let banked = rules.uci === 'crazyhouse' || rules.uci === 'seirawan';
+        let banks = banked ? "[" + pocket.w.toUpperCase() + pocket.b + "]" : "";
+        if (rules.uci === 'seirawan') castling = seirawanRights(grid, castling, pocket);
         // three-check: the checks each side has left, from the "+" moves in the list
         let checks = "";
         if (rules.uci === '3check') {
@@ -686,7 +728,10 @@
         let dx = Math.abs(F[m[2]] - F[m[0]]), dy = Math.abs(+m[3] - +m[1]);
         let isN = (dx === 1 && dy === 2) || (dx === 2 && dy === 1);
         let d = isN ? `M ${p1.x} ${p1.y} L ${p1.x} ${p2.y} L ${p2.x} ${p2.y}` : `M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`;
-        return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.5 : 1}" stroke-opacity="0.9" stroke-linejoin="round" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} marker-end="url(#arr-${i < 3 ? i : 'p'})" />`;
+        // a Seirawan gating move (b1c3h) brings the hawk or elephant in on the back-rank
+        // square it leaves; a promotion to one starts on the rank before the last
+        let gate = /^[he]$/.test(m[4] || '') && /^[18]$/.test(m[1]) ?`<text x="${p1.x}" y="${p1.y}" text-anchor="middle" dominant-baseline="central" font-size="5" font-weight="700" font-family="sans-serif" fill="${col}" fill-opacity="0.9">${m[4].toUpperCase()}</text>` : "";
+        return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.5 : 1}" stroke-opacity="0.9" stroke-linejoin="round" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} marker-end="url(#arr-${i < 3 ? i : 'p'})" />` + gate;
     }
 
     function renderEGThreats(flip) {
@@ -825,7 +870,7 @@
     let usingFallback = false;
     let engineVariant = 'chess';   // UCI_Variant the worker plays; standard chess runs on SF18
     let engineFsf = false;         // whether the worker is Fairy-Stockfish rather than SF10
-    let fsfBroken = false;         // Fairy-Stockfish failed on this page: variants use SF10
+    let fsfBroken = false;         // Fairy-Stockfish failed on this page: the lichess variants use SF10
     let engine960 = false;         // UCI_Chess960 as last sent to the worker
     let pending960 = false;        // whether pendingFen is a Chess960 position
     let searchBoard960 = null;     // the Chess960 board being searched, to spot castling moves
@@ -927,8 +972,9 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     async function createFsfWorker(variant) {
-        let rules = Object.values(LI_VARIANTS).find(v => v.uci === variant);
-        if (!threadsHere()) return createOffscreenWorker(variant, rules.nnue);
+        // chess.com-only variants have no network: Fairy-Stockfish uses its own evaluation
+        let rules = [...Object.values(LI_VARIANTS), ...Object.values(CC_VARIANTS)].find(v => v.uci === variant);
+        if (!threadsHere()) return createOffscreenWorker(variant, rules.nnue || null);
         let [src, wasm, nnue] = await Promise.all([fetchText(FSF_JS), fetchBytes(FSF_WASM), loadNnue(rules.nnue)]);
         if (await sha256(src) !== FSF_SHA256.js || await sha256(wasm) !== FSF_SHA256.wasm) {
             throw new Error('Fairy-Stockfish files do not match their pinned hashes');
@@ -1000,7 +1046,8 @@ if (globalThis.name !== 'em-pthread') {
         w.onerror = () => {
             w.terminate();
             if (engine !== w) return;
-            if (engineFsf) fsfBroken = true;
+            // a variant with no SF10 to turn to retries Fairy-Stockfish instead
+            if (engineFsf && sf10Plays(engineVariant)) fsfBroken = true;
             engine = null;
             engineReady = false;
             searching = false;
@@ -1022,7 +1069,8 @@ if (globalThis.name !== 'em-pthread') {
             retryTimer = setTimeout(ensureEngine, ENGINE_RETRY_MS);
             return;
         }
-        if (SITE === 'chesscom' && !usingFallback) {
+        // chess.com's own engine plays standard chess only
+        if (SITE === 'chesscom' && !usingFallback && engineVariant === 'chess') {
             usingFallback = true;
             engineRetries = 0;
             // deferred: a failing start is still holding engineStarting here
@@ -1049,10 +1097,16 @@ if (globalThis.name !== 'em-pthread') {
 
     async function ensureEngine() {
         if (engine || engineFailed || engineStarting || !iv) return;
-        engineStarting = true;
         let variant = engineVariant;
         let fsf = variant !== 'chess' && fsfUsable();
         let btn = document.getElementById("sa-btn");
+        // a variant only Fairy-Stockfish plays has nothing to fall back on
+        if (variant !== 'chess' && !fsf && !sf10Plays(variant)) {
+            engineFailed = true;
+            if (btn) btn.innerHTML = "Variant engine unavailable";
+            return;
+        }
+        engineStarting = true;
         if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~113MB)"
             : fsf ? "Loading variant engine… (one-time, up to ~59MB)" : "Loading variant engine…";
         try {
@@ -1065,8 +1119,8 @@ if (globalThis.name !== 'em-pthread') {
             // the offscreen engine downloads its network after it starts, so it gets the long wait
             startWorker(w, usingFallback ? 20000 : fsf && threadsHere() ? 60000 : 300000);
         } catch (e) {
-            // a Fairy-Stockfish that cannot load leaves the variants to SF10
-            if (fsf) fsfBroken = true;
+            // a Fairy-Stockfish that cannot load leaves the lichess variants to SF10
+            if (fsf && sf10Plays(variant)) fsfBroken = true;
             // a failed load of a variant nobody wants any more is not a strike against the new one
             if (variant === engineVariant) engineFailedOnce();
         } finally {
@@ -1105,6 +1159,8 @@ if (globalThis.name !== 'em-pthread') {
             stopEngine();
             engineVariant = variant;
             engineFailed = false;
+            // chess.com's own engine stood in for SF18 only, never for a variant
+            usingFallback = false;
             engineRetries = 0;
         }
         engineFlip = flip;
@@ -1248,7 +1304,8 @@ if (globalThis.name !== 'em-pthread') {
                 read: r => r.text().then(pgn => pgn.match(/\[FEN "([^"]+)"\]/)?.[1] || null)
             };
         }
-        if (SITE === 'chesscom') {
+        // the variants server's games are not in chess.com's game API
+        if (SITE === 'chesscom' && !location.pathname.startsWith('/variants/')) {
             let m = location.pathname.match(/\/game\/(?:(live|daily)\/)?(\d+)/);
             return m && {
                 id: m[2],
@@ -1307,6 +1364,7 @@ if (globalThis.name !== 'em-pthread') {
         // A fresh start retries everything, including an engine that gave up
         engineFailed = false;
         usingFallback = false;
+        fsfBroken = false;
         engineRetries = 0;
         btn.innerHTML = "Stop Analyzer";
         moves = []; ponder = "";
@@ -1315,9 +1373,10 @@ if (globalThis.name !== 'em-pthread') {
         iv = setInterval(() => {
             let pos = readBoard();
             if (!pos) return;
-            // a variant no engine here plays gets no arrows rather than wrong ones
-            if (pos.unsupported) {
-                let note = "Variant not supported: " + pos.unsupported;
+            // a variant no engine here plays gets no arrows rather than wrong ones,
+            // and so does a board still being set up
+            if (pos.note) {
+                let note = pos.note;
                 if (fen !== note) {
                     fen = note;
                     idleEngine();
@@ -1609,7 +1668,7 @@ if (globalThis.name !== 'em-pthread') {
     // Variant games stay out of the relay: the web app reads every position as standard chess
     function readRelayBoard() {
         let pos = readBoard();
-        return pos && !pos.unsupported && (pos.rules || STANDARD) === STANDARD ? pos : null;
+        return pos && !pos.note && (pos.rules || STANDARD) === STANDARD ? pos : null;
     }
 
     function refreshRelayMoves(fen) {
