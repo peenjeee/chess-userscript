@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -263,16 +263,13 @@
     // Opponent stays hidden until revealed (server-side zero knowledge).
     // `revealed` array and DOM badges track both sides once revealed.
     let lastEGGrid = null, lastEGFlipped = false;
-    let egSecret = {
-        gameId: '',
-        boardKey: '',
-        ownSquare: null,
-        revealed: [],
-        inFlight: false,
-        notSecret: false,
-        lastOppPawns: null,
-        queenCapturedNotified: false
-    };
+    // `secret` stays null until the API says whether this game is Secret Queen;
+    // the overlay and alerts only show once it has said yes
+    const SECRET_RETRY_MS = 5000;
+    function newSecretState(gameId) {
+        return { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, secret: null, retryAt: 0, spectating: false, lastOppPawns: null, queenCapturedNotified: false };
+    }
+    let egSecret = newSecretState('');
 
     function checkRevealedCaptures(revealed) {
         if (!Array.isArray(revealed) || egSecret.queenCapturedNotified) return;
@@ -294,7 +291,7 @@
     }
 
     function checkSecretQueenCaptures(grid, oppColor) {
-        if (!grid || egSecret.notSecret) return;
+        if (!grid || egSecret.secret !== true) return;
         let currentOppPawns = Object.keys(grid).filter(k => grid[k] === oppColor + 'p');
         if (egSecret.lastOppPawns === null) {
             egSecret.lastOppPawns = currentOppPawns.length;
@@ -322,44 +319,72 @@
         }
     }
 
-    function refreshOwnSecretQueen(boardKey) {
-        let gameId = location.pathname.match(/^\/game\/([\w-]+)/)?.[1];
-        if (!gameId) {
-            egSecret.ownSquare = null;
-            return;
-        }
-        if (egSecret.gameId !== gameId) {
-            egSecret = { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, notSecret: false, lastOppPawns: null, queenCapturedNotified: false };
-        }
-        // one lookup per board change; the square only moves when your pawn does
-        if (egSecret.notSecret || egSecret.inFlight || egSecret.boardKey === boardKey) return;
-        let token = egAccessToken();
-        if (!token) return;  // logged out: endgame.ai would refuse the request anyway
-        let state = egSecret;
+    // The public game endpoint names the variant for anyone: players,
+    // spectators and logged-out visitors. null: no answer yet, ask again later
+    function fetchIsSecretQueen(gameId) {
+        return fetch('/api/games/' + encodeURIComponent(gameId), { headers: { 'Accept': 'application/json' } })
+            .then(r => {
+                if (r.status === 404) return false;
+                return r.ok ? r.json().then(g => g?.variant === 'SecretQueen') : null;
+            });
+    }
+
+    // Once per game. A failed lookup is retried after a few seconds rather
+    // than on the next move: a finished game's board never moves.
+    function lookUpVariant(state) {
+        if (Date.now() < state.retryAt) return;
         state.inFlight = true;
-        // an expired token gets a 401; the site refreshes it, so the next board retries
-        fetch('/api/games/' + encodeURIComponent(gameId) + '/secret-queen', {
+        state.retryAt = Date.now() + SECRET_RETRY_MS;
+        fetchIsSecretQueen(state.gameId)
+            .then(secret => {
+                if (secret === null || egSecret !== state) return;
+                state.secret = secret;
+                // the overlay was held back until now, and the board may not move again soon
+                if (secret) render(lastEGFlipped);
+            })
+            .catch(() => {})
+            .finally(() => { state.inFlight = false; });
+    }
+
+    // Your own hidden queen's square needs your login. One lookup per board
+    // change, whatever the answer: the square only moves when your pawn does,
+    // and the site refreshes an expired token (401) before the next move.
+    function lookUpOwnSquare(state, boardKey) {
+        let token = egAccessToken();
+        if (!token) return;
+        state.inFlight = true;
+        state.boardKey = boardKey;
+        fetch('/api/games/' + encodeURIComponent(state.gameId) + '/secret-queen', {
             headers: { 'Authorization': 'Bearer ' + token, 'x-eg-platform': 'web' }
         })
             .then(r => {
-                if (r.status === 404) return { variant: null };
+                if (r.status === 404) return { spectating: true };
                 return r.ok ? r.json() : null;
             })
             .then(data => {
-                if (!data || egSecret !== state) return;  // network hiccup: retry on the next board
-                if (data.variant !== 'SecretQueen') {
-                    state.notSecret = true;
+                if (!data || egSecret !== state) return;
+                if (data.spectating) {
+                    // not your game: no hidden square of yours to ask about
+                    state.spectating = true;
                     return;
                 }
                 state.ownSquare = !data.ownRevealed && /^[a-h][1-8]$/.test(data.ownSquare || '')
                     ? data.ownSquare
                     : null;
                 state.revealed = Array.isArray(data.revealed) ? data.revealed : [];
-                state.boardKey = boardKey;
                 checkRevealedCaptures(state.revealed);
             })
             .catch(() => {})
             .finally(() => { state.inFlight = false; });
+    }
+
+    function refreshOwnSecretQueen(boardKey) {
+        let gameId = location.pathname.match(/^\/game\/([\w-]+)/)?.[1] || '';
+        // a new game, or a board that is not a game page: forget the old game
+        if (egSecret.gameId !== gameId) egSecret = newSecretState(gameId);
+        if (!gameId || egSecret.inFlight) return;
+        if (egSecret.secret === null) lookUpVariant(egSecret);
+        else if (egSecret.secret && !egSecret.spectating && egSecret.boardKey !== boardKey) lookUpOwnSquare(egSecret, boardKey);
     }
 
     // Other boards (home preview, a previous game) can stay mounted, so pick
@@ -482,7 +507,7 @@
     }
 
     function renderEGThreats(flip) {
-        if (SITE !== 'endgame' || egSecret.notSecret || !lastEGGrid) return "";
+        if (SITE !== 'endgame' || egSecret.secret !== true || !lastEGGrid) return "";
         let oppColor = flip ? 'w' : 'b';
         let myColor = flip ? 'b' : 'w';
 

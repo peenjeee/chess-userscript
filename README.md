@@ -47,7 +47,8 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   Queen** games, hidden queens (own square + revealed pieces from API/DOM badges)
   are analyzed as queens. Includes Secret Queen Threat Overlay (red dashed danger
   lines and target beacons from all living opponent pawns) and auto-detection toast
-  alerts when opponent pawns or their Secret Queen are captured.
+  alerts when opponent pawns or their Secret Queen are captured. Both appear only
+  once endgame.ai's API confirms the game is Secret Queen.
 
 ## Live relay (watch from another device)
 
