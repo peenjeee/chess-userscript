@@ -42,8 +42,12 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   (declared in the header — approve the `chess.0xpnj.dev` permission if your
   userscript manager asks) and caches the 113MB in IndexedDB, so it downloads
   once ever, not once per page.
-- On **endgame.ai** the script runs the same Stockfish 18 NNUE build as on
-  chess.com (cached in IndexedDB), with no site-engine fallback.
+- **endgame.ai**: the script runs the same Stockfish 18 NNUE build as on
+  chess.com (cached in IndexedDB) without site-engine fallback. In **Secret
+  Queen** games, hidden queens (own square + revealed pieces from API/DOM badges)
+  are analyzed as queens. Includes Secret Queen Threat Overlay (red dashed danger
+  lines and target beacons from all living opponent pawns) and auto-detection toast
+  alerts when opponent pawns or their Secret Queen are captured.
 
 ## Live relay (watch from another device)
 

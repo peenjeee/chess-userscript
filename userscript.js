@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -240,6 +240,128 @@
         };
     }
 
+    // Toast notification for in-game tactical alerts
+    function showToast(msg, bg = '#1e1b4b', border = '#6366f1', duration = 4000) {
+        let el = document.getElementById('sa-toast');
+        if (!el) {
+            document.body.insertAdjacentHTML('beforeend', `<div id="sa-toast" style="position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 18px;border-radius:8px;font:600 13px system-ui,-apple-system,sans-serif;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.5);display:none;align-items:center;gap:8px;pointer-events:none;transition:opacity 0.2s ease;"></div>`);
+            el = document.getElementById('sa-toast');
+        }
+        el.innerHTML = msg;
+        el.style.background = bg;
+        el.style.border = `1px solid ${border}`;
+        el.style.display = 'flex';
+        el.style.opacity = '1';
+        clearTimeout(el._t);
+        el._t = setTimeout(() => {
+            el.style.opacity = '0';
+            setTimeout(() => { el.style.display = 'none'; }, 200);
+        }, duration);
+    }
+
+    // Secret Queen: square of hidden queen from endgame.ai's game API.
+    // Opponent stays hidden until revealed (server-side zero knowledge).
+    // `revealed` array and DOM badges track both sides once revealed.
+    let lastEGGrid = null, lastEGFlipped = false;
+    let egSecret = {
+        gameId: '',
+        boardKey: '',
+        ownSquare: null,
+        revealed: [],
+        inFlight: false,
+        notSecret: false,
+        lastOppPawns: null,
+        queenCapturedNotified: false
+    };
+
+    function checkRevealedCaptures(revealed) {
+        if (!Array.isArray(revealed) || egSecret.queenCapturedNotified) return;
+        let oppColor = lastEGFlipped ? 'w' : 'b';
+        let opp = revealed.find(r => r.color === oppColor);
+        if (!opp || !opp.square) return;
+
+        if (lastEGGrid) {
+            let key = ('abcdefgh'.indexOf(opp.square[0]) + 1) + ',' + opp.square[1];
+            let hasQueen = Object.values(lastEGGrid).includes(oppColor + 'q');
+            let hasPawnAtStart = lastEGGrid[key] === oppColor + 'p';
+            if (!hasQueen && !hasPawnAtStart) {
+                egSecret.queenCapturedNotified = true;
+                showToast(`👑 <b>SECRET QUEEN LAWAN TERMAKAN!</b><br>Pion dari petak <b>${opp.square.toUpperCase()}</b> yang kamu makan adalah Secret Queen lawan!`, '#450a0a', '#ef4444', 9000);
+            } else if (opp.revealedAtMoveNumber !== null) {
+                showToast(`⚡ <b>SECRET QUEEN LAWAN TERUNGKAP!</b><br>Lawan menggerakkan Secret Queen dari <b>${opp.square.toUpperCase()}</b>!`, '#312e81', '#6366f1', 6000);
+            }
+        }
+    }
+
+    function checkSecretQueenCaptures(grid, oppColor) {
+        if (!grid || egSecret.notSecret) return;
+        let currentOppPawns = Object.keys(grid).filter(k => grid[k] === oppColor + 'p');
+        if (egSecret.lastOppPawns === null) {
+            egSecret.lastOppPawns = currentOppPawns.length;
+            return;
+        }
+        if (currentOppPawns.length < egSecret.lastOppPawns) {
+            egSecret.lastOppPawns = currentOppPawns.length;
+            showToast(`⚠️ Pion lawan termakan! (Sisa ${currentOppPawns.length} calon Secret Queen)`, '#1e1b4b', '#6366f1', 3500);
+            if (Array.isArray(egSecret.revealed)) {
+                checkRevealedCaptures(egSecret.revealed);
+            }
+        }
+    }
+
+    // endgame.ai authenticates its API with a Bearer token kept in web storage,
+    // not a cookie. It is only ever sent back to endgame.ai's own API here —
+    // never logged and never part of the relay.
+    function egAccessToken() {
+        try {
+            let raw = sessionStorage.getItem('session_key') || localStorage.getItem('session_key');
+            let session = raw ? JSON.parse(raw) : null;
+            return typeof session?.access_token === 'string' ? session.access_token : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function refreshOwnSecretQueen(boardKey) {
+        let gameId = location.pathname.match(/^\/game\/([\w-]+)/)?.[1];
+        if (!gameId) {
+            egSecret.ownSquare = null;
+            return;
+        }
+        if (egSecret.gameId !== gameId) {
+            egSecret = { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, notSecret: false, lastOppPawns: null, queenCapturedNotified: false };
+        }
+        // one lookup per board change; the square only moves when your pawn does
+        if (egSecret.notSecret || egSecret.inFlight || egSecret.boardKey === boardKey) return;
+        let token = egAccessToken();
+        if (!token) return;  // logged out: endgame.ai would refuse the request anyway
+        let state = egSecret;
+        state.inFlight = true;
+        // an expired token gets a 401; the site refreshes it, so the next board retries
+        fetch('/api/games/' + encodeURIComponent(gameId) + '/secret-queen', {
+            headers: { 'Authorization': 'Bearer ' + token, 'x-eg-platform': 'web' }
+        })
+            .then(r => {
+                if (r.status === 404) return { variant: null };
+                return r.ok ? r.json() : null;
+            })
+            .then(data => {
+                if (!data || egSecret !== state) return;  // network hiccup: retry on the next board
+                if (data.variant !== 'SecretQueen') {
+                    state.notSecret = true;
+                    return;
+                }
+                state.ownSquare = !data.ownRevealed && /^[a-h][1-8]$/.test(data.ownSquare || '')
+                    ? data.ownSquare
+                    : null;
+                state.revealed = Array.isArray(data.revealed) ? data.revealed : [];
+                state.boardKey = boardKey;
+                checkRevealedCaptures(state.revealed);
+            })
+            .catch(() => {})
+            .finally(() => { state.inFlight = false; });
+    }
+
     // Other boards (home preview, a previous game) can stay mounted, so pick
     // the largest one that has rendered its cells.
     function findBoardEG() {
@@ -268,12 +390,35 @@
             if (!sq || !p) return;
             let m = p.className.match(/\bpiece\s+([pnbrqk])([wb])\b/);
             if (!m) return;
-            grid[('abcdefgh'.indexOf(sq[1]) + 1) + ',' + sq[2]] = m[2] + m[1];
+            let type = cell.querySelector('.secret-queen-badge') ? 'q' : m[1];
+            grid[('abcdefgh'.indexOf(sq[1]) + 1) + ',' + sq[2]] = m[2] + type;
             if (cell.classList.contains('lastMove')) lastColor = m[2];
         });
-        // A half-rendered board without both kings would crash the engine.
+        // A half-rendered board without both kings will crash the engine.
         let pieces = Object.values(grid);
         if (pieces.filter(p => p === 'wk').length !== 1 || pieces.filter(p => p === 'bk').length !== 1) return null;
+
+        // Secret Queen: hidden queen looks like a pawn on board;
+        // engine must know it moves as a queen (own square + revealed from API)
+        refreshOwnSecretQueen(Object.entries(grid).sort().join(';'));
+        let own = egSecret.ownSquare;
+        if (own) {
+            let key = ('abcdefgh'.indexOf(own[0]) + 1) + ',' + own[1];
+            if (grid[key] && grid[key][1] === 'p') grid[key] = grid[key][0] + 'q';
+        }
+        if (Array.isArray(egSecret.revealed)) {
+            egSecret.revealed.forEach(r => {
+                if (r?.square && /^[a-h][1-8]$/.test(r.square)) {
+                    let key = ('abcdefgh'.indexOf(r.square[0]) + 1) + ',' + r.square[1];
+                    if (grid[key] && grid[key][1] === 'p' && (!r.color || grid[key][0] === r.color)) {
+                        grid[key] = grid[key][0] + 'q';
+                    }
+                }
+            });
+        }
+        lastEGGrid = grid;
+        lastEGFlipped = flipped;
+        checkSecretQueenCaptures(grid, flipped ? 'w' : 'b');
 
         if (lastColor === 'w') currentTurn = 'b';
         else if (lastColor === 'b') currentTurn = 'w';
@@ -336,10 +481,82 @@
         return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${i < 3 ? 1.5 : 1}" stroke-opacity="0.9" stroke-linejoin="round" ${i === 3 ? 'stroke-dasharray="2,1"' : ''} marker-end="url(#arr-${i < 3 ? i : 'p'})" />`;
     }
 
+    function renderEGThreats(flip) {
+        if (SITE !== 'endgame' || egSecret.notSecret || !lastEGGrid) return "";
+        let oppColor = flip ? 'w' : 'b';
+        let myColor = flip ? 'b' : 'w';
+
+        let oppPawns = [];
+        for (let k in lastEGGrid) {
+            if (lastEGGrid[k] === oppColor + 'p') {
+                let [c, r] = k.split(',').map(Number);
+                oppPawns.push({ c, r });
+            }
+        }
+        if (oppPawns.length === 0) return "";
+
+        let pt = (c, r) => {
+            let x = flip ? 9 - c : c;
+            let y = flip ? 9 - r : r;
+            return { x: (x - 1) * 12.5 + 6.25, y: (8 - y) * 12.5 + 6.25 };
+        };
+
+        let dirs = [[1,0], [-1,0], [0,1], [0,-1], [1,1], [-1,1], [1,-1], [-1,-1]];
+        let threats = [];
+        let openLines = [];
+
+        for (let p of oppPawns) {
+            for (let [dc, dr] of dirs) {
+                let nc = p.c + dc, nr = p.r + dr;
+                let endC = null, endR = null;
+                let hitMyPiece = false;
+                while (nc >= 1 && nc <= 8 && nr >= 1 && nr <= 8) {
+                    let target = lastEGGrid[nc + ',' + nr];
+                    if (target) {
+                        if (target[0] === myColor) {
+                            hitMyPiece = true;
+                            endC = nc; endR = nr;
+                        }
+                        break;
+                    }
+                    endC = nc; endR = nr;
+                    nc += dc; nr += dr;
+                }
+                if (endC !== null && endR !== null) {
+                    let p1 = pt(p.c, p.r);
+                    let p2 = pt(endC, endR);
+                    if (hitMyPiece) {
+                        threats.push({ p1, p2, target: { c: endC, r: endR } });
+                    } else {
+                        openLines.push({ p1, p2 });
+                    }
+                }
+            }
+        }
+
+        let out = `<g id="sa-sq-threats">`;
+        for (let l of openLines) {
+            out += `<line x1="${l.p1.x}" y1="${l.p1.y}" x2="${l.p2.x}" y2="${l.p2.y}" stroke="#ef4444" stroke-width="0.35" stroke-dasharray="1,2.5" stroke-opacity="0.22" />`;
+        }
+        for (let t of threats) {
+            out += `<line x1="${t.p1.x}" y1="${t.p1.y}" x2="${t.p2.x}" y2="${t.p2.y}" stroke="#ef4444" stroke-width="0.9" stroke-dasharray="2,1.5" stroke-opacity="0.85" />`;
+            out += `<circle cx="${t.p2.x}" cy="${t.p2.y}" r="3.2" fill="none" stroke="#ef4444" stroke-width="0.9" stroke-opacity="0.9" />`;
+            out += `<circle cx="${t.p2.x}" cy="${t.p2.y}" r="1.2" fill="#ef4444" fill-opacity="0.9" />`;
+        }
+        for (let p of oppPawns) {
+            let p1 = pt(p.c, p.r);
+            out += `<circle cx="${p1.x}" cy="${p1.y}" r="2" fill="none" stroke="#f59e0b" stroke-width="0.75" stroke-opacity="0.85" />`;
+        }
+        out += `</g>`;
+        return out;
+    }
+
     function render(flip) {
         let svg = document.getElementById("sa-arrows");
         if (!svg) return;
-        svg.innerHTML = `<defs>${["#3b82f6", "#ef4444", "#22c55e", "#a855f7"].map((c, i) => `<marker id="arr-${i < 3 ? i : 'p'}" orient="auto" markerWidth="4" markerHeight="4" refX="3" refY="2"><polygon points="0,0 4,2 0,4" fill="${c}"/></marker>`).join('')}</defs>`
+        let threats = renderEGThreats(flip);
+        svg.innerHTML = `<defs>${["#3b82f6", "#ef4444", "#22c55e", "#a855f7"].map((c, i) => `<marker id="arr-${i === 3 ? 'p' : i}" orient="auto" markerWidth="4" markerHeight="4" refX="3" refY="2"><polygon points="0,0 4,2 0,4" fill="${c}"/></marker>`).join('')}</defs>`
+            + threats
             + (ponder ? draw(ponder, 3, flip) : "") + [2, 1, 0].map(i => draw(moves[i], i, flip)).join("");
     }
 
