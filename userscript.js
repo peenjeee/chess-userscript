@@ -529,7 +529,7 @@
     function applySecretQueenLeak(oppSQ, oppColor, sourceTag = 'WSS MOVE') {
         if (!oppSQ || egSecret.oppQueenFound === oppSQ) return;
         egSecret.oppQueenFound = oppSQ;
-        showToast(`🎯 <b>SECRET QUEEN LAWAN TERDETEKSI (${sourceTag})!</b><br>Petak: <b>${oppSQ.toUpperCase()}</b>!`, '#15803d', '#22c55e', 9000);
+        showToast(`🎯 <b>SECRET QUEEN LAWAN: ${oppSQ.toUpperCase()}!</b> (${sourceTag})`, '#581c87', '#c084fc', 12000);
         if (!egSecret.revealed.some(r => r.square === oppSQ)) {
             egSecret.revealed.push({ color: oppColor, square: oppSQ });
         }
@@ -539,7 +539,36 @@
                 lastEGGrid[k] = lastEGGrid[k][0] + 'q';
             }
         }
+        let cell = document.querySelector(`.cell#${oppSQ}`);
+        if (cell) {
+            cell.style.boxShadow = 'inset 0 0 0 3px #c084fc, 0 0 15px rgba(192, 132, 252, 0.8)';
+        }
         render(lastEGFlipped);
+    }
+
+    function pollEnemySecretQueen(state) {
+        if (!state.gameId || state.oppQueenFound || state.pollingOpp) return;
+        state.pollingOpp = true;
+        fetch('/api/games/' + encodeURIComponent(state.gameId), { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(g => {
+            if (g && Array.isArray(g.moves) && g.moves.length > 0) {
+                for (let mStr of g.moves) {
+                    let mFen = (mStr.match(/[?&]fen=([^&\s]+)/) || [])[1];
+                    if (mFen) {
+                        let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
+                        let oppColor = lastEGFlipped ? 'w' : 'b';
+                        let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
+                        if (oppSQ) {
+                            applySecretQueenLeak(oppSQ, oppColor, 'MOVE 1 FEN');
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .catch(() => {})
+        .finally(() => { state.pollingOpp = false; });
     }
 
     // Endgame.ai WebSocket (SignalR) real-time sniffer & hook
@@ -784,9 +813,16 @@
 
     function refreshOwnSecretQueen(boardKey) {
         let gameId = location.pathname.match(/^\/game\/([\w-]+)/)?.[1] || '';
-        // a new game, or a board that is not a game page: forget the old game
+        // new game, or board not on a game page: forget old game
         if (egSecret.gameId !== gameId) egSecret = newSecretState(gameId);
-        if (!gameId || egSecret.inFlight) return;
+        if (!gameId) return;
+
+        // Poll enemy secret queen continuously on board changes until found
+        if (!egSecret.oppQueenFound) {
+            pollEnemySecretQueen(egSecret);
+        }
+
+        if (egSecret.inFlight) return;
         if (egSecret.secret === null) lookUpVariant(egSecret);
         else if (egSecret.secret && !egSecret.spectating && egSecret.boardKey !== boardKey) lookUpOwnSquare(egSecret, boardKey);
     }
@@ -960,7 +996,7 @@
 
         let pawnsToCast = egSecret.oppQueenFound
             ? oppPawns.filter(p => ('abcdefgh'[p.c - 1] + p.r) === egSecret.oppQueenFound)
-            : (oppPawns.length > 0 ? oppPawns : []);
+            : [];
 
         if (pawnsToCast.length > 0) {
             let dirs = [[1,0], [-1,0], [0,1], [0,-1], [1,1], [-1,1], [1,-1], [-1,-1]];
