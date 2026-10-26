@@ -521,38 +521,72 @@
                                 for (let frame of frames) {
                                     try {
                                         let json = JSON.parse(frame);
-                                        if (json.target === 'secretQueenRevealed' || json.target === 'secretQueenSelected') {
-                                            console.log('%c[SA-WSS REVEAL EVENT]', 'color:#ef4444;font-weight:bold;font-size:14px;', json);
+                                        let str = JSON.stringify(json);
+                                        if (json.target === 'secretQueenRevealed' || json.target === 'secretQueenSelected' || str.includes('secretQueen') || str.includes('SecretQueen')) {
+                                            console.log('%c[SA-WSS SECRET QUEEN DATA]', 'color:#ef4444;font-weight:bold;font-size:13px;', json);
                                             window.dispatchEvent(new CustomEvent('sa-wss-reveal', { detail: json }));
                                         } else if (json.target === 'moved') {
                                             console.log('%c[SA-WSS MOVE]', 'color:#10b981;', json.arguments?.[0]);
                                         }
-                                    } catch {
+                                        } catch {
                                         if (frame.includes('secretqueen') || frame.includes('SecretQueen')) {
                                             console.log('%c[SA-WSS RAW]', 'color:#f59e0b;font-weight:bold;', frame);
                                         }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    return ws;
-                };
-                window.WebSocket.prototype = OrigWS.prototype;
-            }})();`;
-            (document.head || document.documentElement).appendChild(hookScript);
-            hookScript.remove();
-        } catch (e) {}
+                                        }
+                                        }
+                                        }
+                                        });
+                                        }
+                                        return ws;
+                                        };
+                                        window.WebSocket.prototype = OrigWS.prototype;
+                                        }})();`;
+                                        (document.head || document.documentElement).appendChild(hookScript);
+                                        hookScript.remove();
+                                        } catch (e) {}
 
-        window.addEventListener('sa-wss-reveal', (e) => {
-            let data = e.detail;
-            if (data?.target === 'secretQueenRevealed') {
-                let arg = data.arguments?.[0];
-                if (arg?.square) {
-                    showToast(`⚡ <b>SECRET QUEEN TERUNGKAP (WSS)!</b><br>Bidak ${arg.color === 'w' ? 'Putih' : 'Hitam'} di petak <b>${arg.square.toUpperCase()}</b> terbuka!`, '#312e81', '#6366f1', 6000);
-                }
-            }
-        });
+                                        window.addEventListener('sa-wss-reveal', (e) => {
+                                        let data = e.detail;
+                                        if (data?.target === 'secretQueenRevealed') {
+                                        let arg = data.arguments?.[0];
+                                        if (arg?.square) {
+                                        let col = arg.color;
+                                        let sq = arg.square;
+                                        showToast(`⚡ <b>SECRET QUEEN TERUNGKAP (WSS)!</b><br>Bidak ${col === 'w' ? 'Putih' : 'Hitam'} di petak <b>${sq.toUpperCase()}</b> terbuka!`, '#312e81', '#6366f1', 6000);
+                                        if (!egSecret.revealed.some(r => r.square === sq)) {
+                                        egSecret.revealed.push({ color: col, square: sq });
+                                        }
+                                        if (lastEGGrid) {
+                                        let k = ('abcdefgh'.indexOf(sq[0]) + 1) + ',' + sq[1];
+                                        if (lastEGGrid[k]) {
+                                        lastEGGrid[k] = lastEGGrid[k][0] + 'q';
+                                        }
+                                        }
+                                        render(lastEGFlipped);
+                                        }
+                                        } else if (data?.target === 'secretQueenSelected') {
+                                        let sq = typeof data.arguments?.[0] === 'string' ? data.arguments[0] : data.arguments?.[0]?.square;
+                                        let col = data.arguments?.[0]?.color;
+                                        let oppColor = lastEGFlipped ? 'w' : 'b';
+                                        if (sq && /^[a-h][1-8]$/.test(sq)) {
+                                        if (col === oppColor || (egSecret.ownSquare && egSecret.ownSquare !== sq)) {
+                                        showToast(`🎯 <b>SECRET QUEEN LAWAN TERDETEKSI DI WSS!</b><br>Petak: <b>${sq.toUpperCase()}</b>!`, '#15803d', '#22c55e', 9000);
+                                        if (!egSecret.revealed.some(r => r.square === sq)) {
+                                        egSecret.revealed.push({ color: oppColor, square: sq });
+                                        }
+                                        if (lastEGGrid) {
+                                        let k = ('abcdefgh'.indexOf(sq[0]) + 1) + ',' + sq[1];
+                                        if (lastEGGrid[k]) {
+                                        lastEGGrid[k] = lastEGGrid[k][0] + 'q';
+                                        }
+                                        }
+                                        render(lastEGFlipped);
+                                        } else {
+                                        egSecret.ownSquare = sq;
+                                        }
+                                        }
+                                        }
+                                        });
     }
 
     function checkRevealedCaptures(revealed) {
