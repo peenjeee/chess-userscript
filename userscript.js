@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.10
+// @version      3.11
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -175,6 +175,7 @@
 
         if (lastMovedColor === 'w') currentTurn = 'b';
         else if (lastMovedColor === 'b') currentTurn = 'w';
+        else if (highlightCount === 0) currentTurn = 'w';
 
         let castling = "";
         let hp = (c, sq) => { let p = getVP(b, sq); return p && p.className.includes(c); };
@@ -264,17 +265,17 @@
         if (lastColor === 'w') currentTurn = 'b';
         else if (lastColor === 'b') currentTurn = 'w';
         else {
-            // Nothing stands on the last-move squares: an atomic capture blew
-            // them up, a Chess960 castle left king and rook elsewhere, or there
-            // is no last move. The analysis board's current move still gives
-            // the ply (two path characters per ply), a live game's running clock
-            // the side to move, and before the first move it is White's turn.
-            let active = host?.querySelector('move.active');
-            let clock = document.querySelector('.rclock.running');
-            if (active) currentTurn = (active.getAttribute('p') || '').length / 2 % 2 ? 'b' : 'w';
-            else if (clock?.classList.contains('rclock-white')) currentTurn = 'w';
-            else if (clock?.classList.contains('rclock-black')) currentTurn = 'b';
-            else if (!lastSquares.length) currentTurn = 'w';
+            const isPuzzle = /^\/(training|streak|storm|racer)\b/.test(location.pathname) || !!document.querySelector('main.puzzle, .puzzle__board, [class*="puzzle"], .streak, .storm, .racer');
+            if (isPuzzle && wrap) {
+                currentTurn = flipped ? 'b' : 'w';
+            } else {
+                let active = host?.querySelector('move.active');
+                let clock = document.querySelector('.rclock.running');
+                if (active) currentTurn = (active.getAttribute('p') || '').length / 2 % 2 ? 'b' : 'w';
+                else if (clock?.classList.contains('rclock-white')) currentTurn = 'w';
+                else if (clock?.classList.contains('rclock-black')) currentTurn = 'b';
+                else if (!lastSquares.length) currentTurn = 'w';
+            }
         }
 
         let f = "";
@@ -527,7 +528,7 @@
     }
 
     function applySecretQueenLeak(oppSQ, oppColor, sourceTag = 'WSS MOVE') {
-        if (!oppSQ || egSecret.oppQueenFound === oppSQ) return;
+        if (egSecret.secret !== true || !oppSQ || egSecret.oppQueenFound === oppSQ) return;
         egSecret.oppQueenFound = oppSQ;
         showToast(`🎯 <b>SECRET QUEEN LAWAN: ${oppSQ.toUpperCase()}!</b> (${sourceTag})`, '#581c87', '#c084fc', 12000);
         if (!egSecret.revealed.some(r => r.square === oppSQ)) {
@@ -547,7 +548,7 @@
     }
 
     function pollEnemySecretQueen(state) {
-        if (!state.gameId || state.oppQueenFound || state.pollingOpp) return;
+        if (state.secret !== true || !state.gameId || state.oppQueenFound || state.pollingOpp) return;
         state.pollingOpp = true;
         fetch('/api/games/' + encodeURIComponent(state.gameId), { cache: 'no-store' })
         .then(r => r.ok ? r.json() : null)
@@ -591,44 +592,86 @@
                 if (window.__saWSHooked) return;
                 window.__saWSHooked = true;
                 const OrigWS = window.WebSocket;
-                window.WebSocket = function(url, protocols) {
-                    const ws = new OrigWS(url, protocols);
-                    if (typeof url === 'string' && url.includes('gamehub')) {
-                        console.log('%c[SA-WSS] Connected to gamehub:', 'color:#3b82f6;font-weight:bold;', url);
-                        ws.addEventListener('message', (e) => {
-                            if (typeof e.data === 'string') {
-                                let frames = e.data.split('\x1e').filter(Boolean);
-                                for (let frame of frames) {
-                                    try {
-                                        let json = JSON.parse(frame);
-                                        let str = JSON.stringify(json);
-                                        console.log('%c[SA-WSS FRAME]', 'color:#94a3b8;', json.target || json.type, json);
-                                        if (json.target === 'secretQueenRevealed' || json.target === 'secretQueenSelected' || str.includes('secretQueen') || str.includes('SecretQueen')) {
-                                            console.log('%c[SA-WSS SECRET QUEEN DATA]', 'color:#ef4444;font-weight:bold;font-size:13px;', json);
-                                            window.dispatchEvent(new CustomEvent('sa-wss-reveal', { detail: json }));
-                                        } else if (json.target === 'moved') {
-                                            console.log('%c[SA-WSS MOVE]', 'color:#10b981;', json.arguments?.[0]);
-                                            window.dispatchEvent(new CustomEvent('sa-wss-move', { detail: json.arguments?.[0] }));
+                const WSProxy = new Proxy(OrigWS, {
+                    construct(target, args) {
+                        const ws = Reflect.construct(target, args);
+                        const url = args[0];
+                        if (typeof url === 'string' && url.includes('gamehub')) {
+                            console.log('%c[SA-WSS] Connected to gamehub:', 'color:#3b82f6;font-weight:bold;', url);
+                            window.__saActiveGameHubWS = ws;
+
+                            const origSend = ws.send;
+                            ws.send = function(data) {
+                                try {
+                                    if (typeof data === 'string') {
+                                        let frames = data.split('\x1e').filter(Boolean);
+                                        for (let frame of frames) {
+                                            let json = JSON.parse(frame);
+                                            if (json.target && (json.target.toLowerCase().includes('move') || json.target.toLowerCase().includes('play'))) {
+                                                window.__saLastMoveTarget = json.target;
+                                                console.log('%c[SA-WSS DETECTED MOVE METHOD]', 'color:#38bdf8;font-weight:bold;', json.target, json.arguments);
+                                            }
                                         }
+                                    }
+                                } catch(e) {}
+                                return origSend.apply(this, arguments);
+                            };
+
+                            window.addEventListener('sa-endgame-ws-send', (e) => {
+                                try {
+                                    const { from, to, promo } = e.detail || {};
+                                    if (!from || !to) return;
+                                    if (ws.readyState !== 1) return;
+                                    const target = window.__saLastMoveTarget || 'Move';
+                                    const moveUci = from + to + (promo ? promo.toLowerCase() : '');
+                                    const payload = JSON.stringify({
+                                        type: 1,
+                                        target: target,
+                                        arguments: [moveUci]
+                                    }) + '\x1e';
+                                    console.log('%c[SA-WSS DISPATCHING DIRECT MOVE]', 'color:#10b981;font-weight:bold;', payload);
+                                    ws.send(payload);
+                                } catch(err) {
+                                    console.error('[SA-WSS] Move dispatch error:', err);
+                                }
+                            });
+
+                            ws.addEventListener('message', (e) => {
+                                if (typeof e.data === 'string') {
+                                    let frames = e.data.split('\x1e').filter(Boolean);
+                                    for (let frame of frames) {
+                                        try {
+                                            let json = JSON.parse(frame);
+                                            let str = JSON.stringify(json);
+                                            console.log('%c[SA-WSS FRAME]', 'color:#94a3b8;', json.target || json.type, json);
+                                            if (json.target === 'secretQueenRevealed' || json.target === 'secretQueenSelected' || str.includes('secretQueen') || str.includes('SecretQueen')) {
+                                                console.log('%c[SA-WSS SECRET QUEEN DATA]', 'color:#ef4444;font-weight:bold;font-size:13px;', json);
+                                                window.dispatchEvent(new CustomEvent('sa-wss-reveal', { detail: json }));
+                                            } else if (json.target === 'moved') {
+                                                console.log('%c[SA-WSS MOVE]', 'color:#10b981;', json.arguments?.[0]);
+                                                window.dispatchEvent(new CustomEvent('sa-wss-move', { detail: json.arguments?.[0] }));
+                                            }
                                         } catch {
-                                        if (frame.includes('secretqueen') || frame.includes('SecretQueen')) {
-                                            console.log('%c[SA-WSS RAW]', 'color:#f59e0b;font-weight:bold;', frame);
+                                            if (frame.includes('secretqueen') || frame.includes('SecretQueen')) {
+                                                console.log('%c[SA-WSS RAW]', 'color:#f59e0b;font-weight:bold;', frame);
+                                            }
                                         }
-                                        }
-                                        }
-                                        }
-                                        });
-                                        }
-                                        return ws;
-                                        };
-                                        window.WebSocket.prototype = OrigWS.prototype;
-                                        }})();`;
-                                        (document.head || document.documentElement).appendChild(hookScript);
-                                        hookScript.remove();
-                                        } catch (e) {}
+                                    }
+                                }
+                            });
+                        }
+                        return ws;
+                    }
+                });
+                window.WebSocket = WSProxy;
+            }})();`;
+            (document.head || document.documentElement).appendChild(hookScript);
+            hookScript.remove();
+        } catch (e) {}
 
                                         window.addEventListener('sa-wss-reveal', (e) => {
-                                        let data = e.detail;
+                                            if (egSecret.secret !== true) return;
+                                            let data = e.detail;
                                         if (data?.target === 'secretQueenRevealed') {
                                         let arg = data.arguments?.[0];
                                         if (arg?.square) {
@@ -651,6 +694,7 @@
                                         });
 
                                         window.addEventListener('sa-wss-move', (e) => {
+                                            if (egSecret.secret !== true) return;
                                             let moveStr = e.detail;
                                             if (typeof moveStr !== 'string') return;
 
@@ -821,8 +865,8 @@
         if (egSecret.gameId !== gameId) egSecret = newSecretState(gameId);
         if (!gameId) return;
 
-        // Poll enemy secret queen continuously on board changes until found
-        if (!egSecret.oppQueenFound) {
+        // Poll enemy secret queen continuously on board changes until found (only if variant is SecretQueen)
+        if (egSecret.secret === true && !egSecret.oppQueenFound) {
             pollEnemySecretQueen(egSecret);
         }
 
@@ -859,7 +903,7 @@
             if (!sq || !p) return;
             let m = p.className.match(/\bpiece\s+([pnbrqk])([wb])\b/);
             if (!m) return;
-            let type = cell.querySelector('.secret-queen-badge') ? 'q' : m[1];
+            let type = (egSecret.secret === true && cell.querySelector('.secret-queen-badge')) ? 'q' : m[1];
             grid[('abcdefgh'.indexOf(sq[1]) + 1) + ',' + sq[2]] = m[2] + type;
             if (cell.classList.contains('lastMove')) lastColor = m[2];
         });
@@ -867,38 +911,55 @@
         let pieces = Object.values(grid);
         if (pieces.filter(p => p === 'wk').length !== 1 || pieces.filter(p => p === 'bk').length !== 1) return null;
 
-        // Secret Queen: hidden queen looks like a pawn on board;
-        // engine must know it moves as a queen (own square + revealed from API + oppQueenFound)
         refreshOwnSecretQueen(Object.entries(grid).sort().join(';'));
-        let own = egSecret.ownSquare;
-        if (own) {
-            let key = ('abcdefgh'.indexOf(own[0]) + 1) + ',' + own[1];
-            if (grid[key] && grid[key][1] === 'p') grid[key] = grid[key][0] + 'q';
-        }
-        if (egSecret.oppQueenFound) {
-            let oppSQ = egSecret.oppQueenFound;
-            let oppColor = flipped ? 'w' : 'b';
-            let key = ('abcdefgh'.indexOf(oppSQ[0]) + 1) + ',' + oppSQ[1];
-            if (grid[key] && grid[key][1] === 'p') {
-                grid[key] = oppColor + 'q';
+        if (egSecret.secret === true) {
+            let own = egSecret.ownSquare;
+            if (own) {
+                let key = ('abcdefgh'.indexOf(own[0]) + 1) + ',' + own[1];
+                if (grid[key] && grid[key][1] === 'p') grid[key] = grid[key][0] + 'q';
             }
-        }
-        if (Array.isArray(egSecret.revealed)) {
-            egSecret.revealed.forEach(r => {
-                if (r?.square && /^[a-h][1-8]$/.test(r.square)) {
-                    let key = ('abcdefgh'.indexOf(r.square[0]) + 1) + ',' + r.square[1];
-                    if (grid[key] && grid[key][1] === 'p' && (!r.color || grid[key][0] === r.color)) {
-                        grid[key] = grid[key][0] + 'q';
-                    }
+            if (egSecret.oppQueenFound) {
+                let oppSQ = egSecret.oppQueenFound;
+                let oppColor = flipped ? 'w' : 'b';
+                let key = ('abcdefgh'.indexOf(oppSQ[0]) + 1) + ',' + oppSQ[1];
+                if (grid[key] && grid[key][1] === 'p') {
+                    grid[key] = oppColor + 'q';
                 }
-            });
+            }
+            if (Array.isArray(egSecret.revealed)) {
+                egSecret.revealed.forEach(r => {
+                    if (r?.square && /^[a-h][1-8]$/.test(r.square)) {
+                        let key = ('abcdefgh'.indexOf(r.square[0]) + 1) + ',' + r.square[1];
+                        if (grid[key] && grid[key][1] === 'p' && (!r.color || grid[key][0] === r.color)) {
+                            grid[key] = grid[key][0] + 'q';
+                        }
+                    }
+                });
+            }
+            checkSecretQueenCaptures(grid, flipped ? 'w' : 'b');
         }
-        lastEGGrid = grid;
-        lastEGFlipped = flipped;
-        checkSecretQueenCaptures(grid, flipped ? 'w' : 'b');
 
+        let lastMoveSquares = b.querySelectorAll('.cell.lastMove');
         if (lastColor === 'w') currentTurn = 'b';
         else if (lastColor === 'b') currentTurn = 'w';
+        else if (!lastMoveSquares.length) currentTurn = 'w';
+        else {
+            // Fallback for mid-game if lastColor was null: detect active clock
+            const clocks = document.querySelectorAll('[class*="clock"], [class*="timer"]');
+            let activeSide = null;
+            clocks.forEach(clk => {
+                const style = clk.getAttribute('style') || '';
+                const cls = clk.className || '';
+                const isActive = cls.includes('active') || cls.includes('running') || cls.includes('purple') || style.includes('background');
+                if (isActive) {
+                    const r = clk.getBoundingClientRect();
+                    const bRect = b.getBoundingClientRect();
+                    const isBottom = r.top > (bRect.top + bRect.height / 2);
+                    activeSide = isBottom ? (flipped ? 'b' : 'w') : (flipped ? 'w' : 'b');
+                }
+            });
+            if (activeSide) currentTurn = activeSide;
+        }
 
         let f = "";
         for (let r = 8; r >= 1; r--) {
@@ -1870,6 +1931,9 @@ if (globalThis.name !== 'em-pthread') {
             stopEngine();
             document.getElementById("sa-arrows")?.remove();
             btn.innerHTML = "Start Analyzer (Hotkey: A)";
+            if (autoMoveEnabled) {
+                toggleAutoMove();
+            }
             return;
         }
 
@@ -1977,6 +2041,11 @@ if (globalThis.name !== 'em-pthread') {
             return !!document.querySelector('.game-over-modal-content, .game-over-header-component, [class*="game-over-modal"]');
         }
         if (SITE === 'endgame') return !!document.querySelector('.finish-game-overlay');
+        if (SITE === 'lichess' && (/^\/(training|streak|storm|racer)\b/.test(location.pathname) || document.querySelector('main.puzzle, .puzzle__board, .streak, .storm'))) {
+            const wrap = document.querySelector('.cg-wrap');
+            if (wrap && wrap.classList.contains('manipulable')) return false;
+            return !!document.querySelector('.storm__game-over, .streak__game-over, .puzzle__feedback.fail');
+        }
         return !!document.querySelector('.result-wrap, .round__app .status');
     }
 
@@ -2281,6 +2350,961 @@ if (globalThis.name !== 'em-pthread') {
         if (pos && !isGameOver()) publishRelayPosition(pos, true);
     }, 2000);
 
+    // ---------------------------------------------------------------- auto move
+    let autoMoveEnabled = false;
+    let autoMoveTimer = null;
+    let lastAutoMoveFen = null;
+    let isMoving = false;
+    let pendingMoveFen = null;
+
+    function installInlineBridge() {
+        if (document.getElementById('sa-bridge-tag')) return;
+        try {
+            const s = document.createElement('script');
+            s.id = 'sa-bridge-tag';
+            s.textContent = `(${function() {
+                // Hook EventTarget on Lichess so synthetic mouse/touch events report isTrusted = true
+                // Disable Chessground's isTrusted restriction on Lichess
+                try {
+                    const origDefine = Object.defineProperty;
+                    Object.defineProperty = function(obj, prop, descriptor) {
+                        if (prop === 'trustAllEvents' && descriptor) {
+                            if ('value' in descriptor) descriptor.value = true;
+                        }
+                        return origDefine.apply(this, arguments);
+                    };
+                    origDefine(Object.prototype, 'trustAllEvents', {
+                        get() { return true; },
+                        set(v) {},
+                        configurable: true
+                    });
+                } catch (e) {}
+
+                // Hook WebSocket for Lichess
+                let lichessSocket = null;
+                const OrigWS = window.WebSocket;
+                window.WebSocket = function(url, protocols) {
+                    const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+                    const urlStr = String(url || '');
+                    if (urlStr.includes('lichess') || urlStr.includes('/play/') || urlStr.includes('/round/') || urlStr.includes('/watch/')) {
+                        lichessSocket = ws;
+                        window.__saLichessWS = ws;
+                    }
+                    return ws;
+                };
+                window.WebSocket.prototype = OrigWS.prototype;
+
+                function isCastlingMatch(m, from, to) {
+                    if (!m) return false;
+                    if (m.from === from && m.to === to) return true;
+                    const isKingMove = from === 'e1' || from === 'e8' || m.piece === 'k';
+                    const isCastleSan = m.san === 'O-O' || m.san === 'O-O-O';
+                    const isCastleTarget = ['g1', 'c1', 'g8', 'c8', 'h1', 'a1', 'h8', 'a8'].includes(to);
+                    if (isKingMove && isCastleSan && isCastleTarget) return true;
+                    return false;
+                }
+
+                function isDropMatch(m, from, to) {
+                    if (!m || !from.includes('@')) return false;
+                    const dropRole = from[0].toLowerCase();
+                    return (m.dropPiece && m.dropPiece.toLowerCase() === dropRole && m.to === to) ||
+                           (m.from && m.from.toLowerCase() === (dropRole + '@') && m.to === to);
+                }
+
+                function makeChessComMove(from, to, promo, duckTo) {
+                    const board = document.querySelector('wc-chess-board') || document.querySelector('chess-board');
+                    if (!board) return false;
+                    const game = board.game || board._game;
+                    if (!game) return false;
+                    if (typeof game.getLegalMoves === 'function' && typeof game.move === 'function') {
+                        try {
+                            const legal = game.getLegalMoves();
+                            for (let i = 0; i < legal.length; i++) {
+                                const m = legal[i];
+                                if (isCastlingMatch(m, from, to) || isDropMatch(m, from, to)) {
+                                    const moveObj = Object.assign({}, m, { animate: true, userGenerated: true });
+                                    if (m.promotion || promo) {
+                                        moveObj.promotion = (promo || 'q').toLowerCase();
+                                    }
+                                    if (duckTo) {
+                                        moveObj.duck = duckTo;
+                                    }
+                                    game.move(moveObj);
+                                    return true;
+                                }
+                            }
+                        } catch (err) {}
+                    }
+                    if (typeof game.userMove === 'function') {
+                        try {
+                            const res = game.userMove(from, to, promo ? promo.toLowerCase() : undefined);
+                            if (res) return true;
+                        } catch (e) {}
+                    }
+                    return false;
+                }
+
+                function makeLichessMove(from, to, promo, explicitUci) {
+                    const uci = explicitUci || (from.includes('@') ? (from[0].toUpperCase() + '@' + to) : (from + to + (promo ? promo.toLowerCase() : '')));
+                    const isDrop = uci.includes('@') || from.includes('@');
+                    const isPuzzle = /^\/(training|streak|storm|racer)\b/.test(location.pathname) ||
+                                     !!document.querySelector('main.puzzle, .puzzle__board, [class*="puzzle"], .streak, .storm, .racer') ||
+                                     !!window.lichess?.puzzle;
+
+                    // In Puzzles:
+                    if (isPuzzle) {
+                        try {
+                            if (window.lichess?.puzzle?.playUci && typeof window.lichess.puzzle.playUci === 'function') {
+                                window.lichess.puzzle.playUci(uci);
+                                return true;
+                            }
+                        } catch (e) {}
+                        try {
+                            if (window.lichess?.analysis?.playUci && typeof window.lichess.analysis.playUci === 'function') {
+                                window.lichess.analysis.playUci(uci);
+                                return true;
+                            }
+                        } catch (e) {}
+                        if (!isDrop) {
+                            try {
+                                const cg = window.lichess?.chessground || window.lichess?.round?.chessground || window.lichess?.analysis?.chessground;
+                                if (cg) {
+                                    if (typeof cg.userMove === 'function') { cg.userMove(from, to); return true; }
+                                    if (typeof cg.move === 'function') { cg.move(from, to); return true; }
+                                }
+                            } catch (e) {}
+                        }
+                        return false;
+                    }
+
+                    // Priority 1: Live Game WebSocket (Crazyhouse, Bullet, Blitz, Standard)
+                    try {
+                        if (window.lichess?.socket?.send) {
+                            window.lichess.socket.send('move', { u: uci, b: 1 });
+                            return true;
+                        }
+                    } catch (e) {}
+                    const ws = window.__saLichessWS || lichessSocket;
+                    if (ws && ws.readyState === 1) {
+                        try {
+                            ws.send(JSON.stringify({ t: 'move', d: { u: uci, b: 1 } }));
+                            return true;
+                        } catch (err) {}
+                    }
+                    try {
+                        if (window.site?.socket?.send) {
+                            window.site.socket.send('move', { u: uci, b: 1 });
+                            return true;
+                        }
+                    } catch (e) {}
+
+                    // Priority 3: Chessground userMove (Only if not a drop move)
+                    if (!isDrop) {
+                        try {
+                            const cg = window.lichess?.chessground || window.lichess?.round?.chessground || window.lichess?.analysis?.chessground;
+                            if (cg) {
+                                if (typeof cg.userMove === 'function') { cg.userMove(from, to); return true; }
+                                if (typeof cg.move === 'function') { cg.move(from, to); return true; }
+                            }
+                        } catch (e) {}
+                    }
+
+                    return false;
+                }
+
+                function tryPageBridgePromotion(promo) {
+                    const p = (promo || 'q').toLowerCase();
+                    try {
+                        const board = document.querySelector('wc-chess-board') || document.querySelector('chess-board');
+                        if (board && board.game) {
+                            const g = board.game;
+                            if (typeof g.promote === 'function') { g.promote(p); return true; }
+                            if (typeof g.onPromotionPiece === 'function') { g.onPromotionPiece(p); return true; }
+                            if (typeof g.selectPromotionPiece === 'function') { g.selectPromotionPiece(p); return true; }
+                            if (typeof g.setPromotionPiece === 'function') { g.setPromotionPiece(p); return true; }
+                            if (typeof g.resolvePromotion === 'function') { g.resolvePromotion(p); return true; }
+                            for (const k in g) {
+                                if (typeof g[k] === 'function' && /promo/i.test(k)) {
+                                    try { g[k](p); return true; } catch (err) {}
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    return false;
+                }
+
+                window.addEventListener('sa-page-promote', function(e) {
+                    const promo = e.detail?.promo || 'q';
+                    tryPageBridgePromotion(promo);
+                });
+
+                window.addEventListener('sa-page-move', function(e) {
+                    const { from, to, promo, duckTo, uci } = e.detail || {};
+                    if (!from || !to) return;
+                    let ok = false;
+                    if (location.hostname.includes('lichess')) {
+                        ok = makeLichessMove(from, to, promo, uci);
+                    } else {
+                        ok = makeChessComMove(from, to, promo, duckTo);
+                    }
+                    window.dispatchEvent(new CustomEvent('sa-page-move-ack', { detail: { ok, from, to } }));
+                });
+            }})();`;
+            (document.head || document.documentElement).appendChild(s);
+            s.remove();
+        } catch (e) {}
+    }
+    installInlineBridge();
+
+    function getSquareCoords(b, sq, flipped) {
+        if (!b || !sq || sq.length < 2) return null;
+        const rect = b.getBoundingClientRect();
+        if (!rect || rect.width === 0 || rect.height === 0) return null;
+        const sqWidth = rect.width / 8;
+        const sqHeight = rect.height / 8;
+        const fileIdx = 'abcdefgh'.indexOf(sq[0].toLowerCase());
+        const rankIdx = parseInt(sq[1], 10) - 1;
+        if (fileIdx < 0 || rankIdx < 0 || rankIdx > 7) return null;
+
+        let x, y;
+        if (flipped) {
+            x = rect.left + (7 - fileIdx + 0.5) * sqWidth;
+            y = rect.top + (rankIdx + 0.5) * sqHeight;
+        } else {
+            x = rect.left + (fileIdx + 0.5) * sqWidth;
+            y = rect.top + (7 - rankIdx + 0.5) * sqHeight;
+        }
+        return { x, y };
+    }
+
+    function findGeometricPromotionTarget(b, p) {
+        if (!b) b = document.querySelector('wc-chess-board, cg-board, .board, .board-container .board') || document.body;
+        const bRect = b.getBoundingClientRect();
+        if (!bRect || bRect.width === 0) return null;
+
+        const sqSize = bRect.width / 8;
+        const allDivs = document.querySelectorAll('div, section, aside, form');
+        const roleIdx = { q: 0, r: 1, b: 2, n: 3 }[p] ?? 0;
+
+        for (const el of allDivs) {
+            if (el === b || el === document.body || el.id === 'sa-wrap' || el.id === 'sa-arrows') continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+
+            const inBoard = rect.left >= bRect.left - 20 && rect.right <= bRect.right + 20 &&
+                            rect.top >= bRect.top - 20 && rect.bottom <= bRect.bottom + 20;
+            if (!inBoard) continue;
+
+            const ratioV = rect.height / rect.width;
+            const ratioH = rect.width / rect.height;
+
+            // Vertical 4-piece column (e.g. over promotion square on Chess.com / Endgame.ai)
+            if (ratioV >= 2.0 && ratioV <= 6.5 && rect.width < sqSize * 1.8 && rect.height > sqSize * 1.8) {
+                const isTop = (rect.top - bRect.top) < (bRect.bottom - rect.bottom);
+                const targetX = rect.left + rect.width / 2;
+                const fraction = isTop ? (roleIdx * 0.25 + 0.125) : ((3 - roleIdx) * 0.25 + 0.125);
+                const targetY = rect.top + rect.height * fraction;
+                return { x: targetX, y: targetY, el };
+            }
+
+            // Horizontal 4-piece row
+            if (ratioH >= 2.0 && ratioH <= 6.5 && rect.height < sqSize * 1.8 && rect.width > sqSize * 1.8) {
+                const targetY = rect.top + rect.height / 2;
+                const targetX = rect.left + rect.width * (roleIdx * 0.25 + 0.125);
+                return { x: targetX, y: targetY, el };
+            }
+        }
+        return null;
+    }
+
+    function hasPromotionModal() {
+        if (SITE === 'chesscom') {
+            return !!document.querySelector('.promotion-window, [class*="promotion-window"], .promotion-menu');
+        }
+        if (SITE === 'endgame') {
+            return !!document.querySelector('.turn-into-selection, [class*="turn-into"]');
+        }
+        if (SITE === 'lichess') {
+            return !!document.querySelector('#promotion-choice, #promotion_choice, .promotion-choice, square.promotion');
+        }
+        return false;
+    }
+
+    function handlePromotion(promo) {
+        if (!hasPromotionModal()) return false;
+
+        const p = (promo || 'q').toLowerCase();
+        const roleIdx = { q: 0, r: 1, b: 2, n: 3 }[p] ?? 0;
+        const liName = { q: 'queen', n: 'knight', r: 'rook', b: 'bishop' }[p] || 'queen';
+
+        // 0. Trigger controller in MAIN world page-bridge
+        try {
+            window.dispatchEvent(new CustomEvent('sa-page-promote', { detail: { promo: p } }));
+        } catch (e) {}
+
+        const fireFullClick = (el) => {
+            if (!el) return false;
+            try { el.click(); } catch (e) {}
+            const r = el.getBoundingClientRect();
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+            try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
+            try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch (e) {}
+            try { el.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 })); } catch (e) {}
+            try { el.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 })); } catch (e) {}
+            try { el.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 })); } catch (e) {}
+            try { el.click(); } catch (e) {}
+            return true;
+        };
+
+        // Platform 1: Endgame.ai Vue.js modal (.turn-into-selection)
+        if (SITE === 'endgame') {
+            const egSelection = document.querySelector('.turn-into-selection, [class*="turn-into"]');
+            if (egSelection) {
+                const children = Array.from(egSelection.children).filter(c => c.tagName !== 'STYLE' && c.tagName !== 'SCRIPT');
+                if (children.length >= 4) {
+                    const target = children[roleIdx];
+                    if (target) {
+                        console.log('[AutoMove EG] .turn-into-selection child found, clicking index:', roleIdx, target);
+                        fireFullClick(target);
+                        const inner = target.querySelector('.piece, div, img, svg') || target;
+                        if (inner && inner !== target) {
+                            try { inner.click(); } catch (e) {}
+                            try { inner.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window })); } catch (e) {}
+                        }
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Platform 2: Chess.com (.promotion-window)
+        if (SITE === 'chesscom') {
+            const win = document.querySelector('.promotion-window, [class*="promotion-window"], .promotion-menu');
+            if (win) {
+                const targetPiece = win.querySelector(`.promotion-piece.w${p}, .promotion-piece.b${p}, .promotion-piece.${p}`) ||
+                                    win.children[roleIdx] || win.firstElementChild;
+                if (targetPiece) {
+                    console.log('[AutoMove CC] Clicking promotion piece:', targetPiece);
+                    fireFullClick(targetPiece);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Platform 3: Lichess (#promotion-choice)
+        if (SITE === 'lichess') {
+            const target = document.querySelector(`#promotion-choice .${liName}, #promotion_choice .${liName}, square.promotion .${liName}, #promotion-choice square:nth-child(${roleIdx + 1})`);
+            if (target) {
+                console.log('[AutoMove LI] Clicking promotion choice:', target);
+                fireFullClick(target);
+                return true;
+            }
+            return false;
+        }
+
+        return false;
+    }
+
+    async function waitForAndPromote(promo) {
+        const p = (promo || 'q').toLowerCase();
+        for (let i = 0; i < 30; i++) {
+            if (handlePromotion(p)) return true;
+            await new Promise(r => setTimeout(r, 40));
+        }
+        return false;
+    }
+
+    let lastSecretQueenAttempt = 0;
+    function autoSelectSecretQueen(flipped) {
+        if (SITE !== 'endgame' || egSecret.secret !== true || egSecret.ownSquare) return;
+        if (Date.now() - lastSecretQueenAttempt < 2500) return;
+
+        const bestSquare = flipped ? 'd7' : 'd2';
+        const cell = document.querySelector(`.cell#${bestSquare}`);
+        if (cell && !cell.querySelector('.secret-queen-badge')) {
+            lastSecretQueenAttempt = Date.now();
+            const piece = cell.querySelector('.piece') || cell;
+            console.log('[AutoMove EG] Auto-selecting Secret Queen once on:', bestSquare);
+            const r = piece.getBoundingClientRect();
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+            piece.dispatchEvent(new PointerEvent('pointerdown', opts));
+            piece.dispatchEvent(new MouseEvent('mousedown', opts));
+            setTimeout(() => {
+                piece.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 }));
+                piece.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+                piece.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 }));
+                try { piece.click(); } catch (e) {}
+                try { cell.click(); } catch (e) {}
+            }, 30);
+        }
+    }
+
+    async function makeEndgameMove(from, to, promo, b) {
+        const fromCell = b.querySelector(`.cell#${from}`) || document.querySelector(`.cell#${from}`);
+        const toCell = b.querySelector(`.cell#${to}`) || document.querySelector(`.cell#${to}`);
+        if (!fromCell || !toCell) {
+            console.warn('[AutoMove EG] Cells not found:', from, to);
+            return false;
+        }
+
+        const fromPiece = fromCell.querySelector('.piece') || fromCell;
+        const toPiece = toCell.querySelector('.piece') || toCell;
+
+        const r1 = fromPiece.getBoundingClientRect();
+        const r2 = toCell.getBoundingClientRect();
+        const x1 = r1.left + r1.width / 2;
+        const y1 = r1.top + r1.height / 2;
+        const x2 = r2.left + r2.width / 2;
+        const y2 = r2.top + r2.height / 2;
+
+        const makeEvt = (type, x, y, buttons) => new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(type, {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: x, clientY: y, screenX: x, screenY: y,
+            pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: buttons
+        });
+
+        // 1. Click-to-move sequence on From
+        fromPiece.dispatchEvent(makeEvt('pointerdown', x1, y1, 1));
+        fromPiece.dispatchEvent(makeEvt('mousedown', x1, y1, 1));
+        fromCell.dispatchEvent(makeEvt('pointerdown', x1, y1, 1));
+        fromCell.dispatchEvent(makeEvt('mousedown', x1, y1, 1));
+
+        await new Promise(r => setTimeout(r, 20));
+
+        fromPiece.dispatchEvent(makeEvt('pointerup', x1, y1, 0));
+        fromPiece.dispatchEvent(makeEvt('mouseup', x1, y1, 0));
+        fromPiece.dispatchEvent(makeEvt('click', x1, y1, 0));
+        fromCell.dispatchEvent(makeEvt('pointerup', x1, y1, 0));
+        fromCell.dispatchEvent(makeEvt('mouseup', x1, y1, 0));
+        fromCell.dispatchEvent(makeEvt('click', x1, y1, 0));
+        try { fromPiece.click(); } catch(e) {}
+        try { fromCell.click(); } catch(e) {}
+
+        await new Promise(r => setTimeout(r, 60));
+
+        // 2. Click-to-move sequence on To
+        toPiece.dispatchEvent(makeEvt('pointerdown', x2, y2, 1));
+        toPiece.dispatchEvent(makeEvt('mousedown', x2, y2, 1));
+        toCell.dispatchEvent(makeEvt('pointerdown', x2, y2, 1));
+        toCell.dispatchEvent(makeEvt('mousedown', x2, y2, 1));
+
+        await new Promise(r => setTimeout(r, 20));
+
+        toPiece.dispatchEvent(makeEvt('pointerup', x2, y2, 0));
+        toPiece.dispatchEvent(makeEvt('mouseup', x2, y2, 0));
+        toPiece.dispatchEvent(makeEvt('click', x2, y2, 0));
+        toCell.dispatchEvent(makeEvt('pointerup', x2, y2, 0));
+        toCell.dispatchEvent(makeEvt('mouseup', x2, y2, 0));
+        toCell.dispatchEvent(makeEvt('click', x2, y2, 0));
+        try { toPiece.click(); } catch(e) {}
+        try { toCell.click(); } catch(e) {}
+
+        // 3. Drag sequence (pointermove) in case board requires drag
+        await new Promise(r => setTimeout(r, 40));
+        const stillThere = fromCell.querySelector('.piece');
+        if (stillThere) {
+            fromPiece.dispatchEvent(makeEvt('pointerdown', x1, y1, 1));
+            fromPiece.dispatchEvent(makeEvt('mousedown', x1, y1, 1));
+            await new Promise(r => setTimeout(r, 20));
+
+            for (let i = 1; i <= 3; i++) {
+                const t = i / 3;
+                const cx = x1 + (x2 - x1) * t;
+                const cy = y1 + (y2 - y1) * t;
+                window.dispatchEvent(makeEvt('pointermove', cx, cy, 1));
+                window.dispatchEvent(makeEvt('mousemove', cx, cy, 1));
+                await new Promise(r => setTimeout(r, 10));
+            }
+
+            toCell.dispatchEvent(makeEvt('pointerup', x2, y2, 0));
+            toCell.dispatchEvent(makeEvt('mouseup', x2, y2, 0));
+            toCell.dispatchEvent(makeEvt('click', x2, y2, 0));
+
+            // HTML5 Drag
+            try {
+                const dt = new DataTransfer();
+                fromPiece.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x1, clientY: y1 }));
+                toCell.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x2, clientY: y2 }));
+                toCell.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x2, clientY: y2 }));
+                toCell.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x2, clientY: y2 }));
+                fromPiece.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x2, clientY: y2 }));
+            } catch (e) {}
+        }
+
+        // 4. WebSocket SignalR backup
+        window.dispatchEvent(new CustomEvent('sa-endgame-ws-send', { detail: { from, to, promo } }));
+
+        const isPromotion = promo !== null || ((from[1] === '7' && to[1] === '8') || (from[1] === '2' && to[1] === '1'));
+        if (isPromotion) {
+            await waitForAndPromote(promo || 'q');
+        }
+
+        return true;
+    }
+
+    async function makeLichessMoveDOM(from, to, promo, b, flipped, isDrop) {
+        const toCoord = getSquareCoords(b, to, flipped);
+        if (!toCoord) return false;
+
+        const makeMouseEvt = (type, x, y, buttons) => new MouseEvent(type, {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: x, clientY: y, screenX: x, screenY: y, button: 0, buttons: buttons
+        });
+
+        if (isDrop) {
+            const role = from[0].toLowerCase();
+            const roleName = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen' }[role] || 'pawn';
+            const myColor = flipped ? 'b' : 'w';
+
+            // Find player's pocket at bottom of screen
+            const playerPocket = document.querySelector('.pocket.is2d.pocket-bottom.usable, .pocket.is2d.pocket-bottom, .pocket-bottom, [class*="pocket-bot"]');
+            let pocketPiece = null;
+
+            if (playerPocket) {
+                // Specifically query <piece> elements inside the pocket
+                const candidates = playerPocket.querySelectorAll(`piece[data-role="${roleName}"], piece.${roleName}, [data-role="${roleName}"]`);
+                for (const p of candidates) {
+                    const count = parseInt(p.getAttribute('data-nb') || p.dataset.nb || '0', 10);
+                    if (count > 0) {
+                        pocketPiece = p;
+                        break;
+                    }
+                }
+                if (!pocketPiece) {
+                    for (const p of playerPocket.querySelectorAll('piece')) {
+                        const r = p.getAttribute('data-role') || '';
+                        const cls = p.className || '';
+                        const count = parseInt(p.getAttribute('data-nb') || '0', 10);
+                        if ((r === roleName || cls.includes(roleName)) && count > 0) {
+                            pocketPiece = p;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            console.log('[AutoMove Lichess Crazyhouse] Target drop piece:', pocketPiece, 'role:', roleName, 'to:', to);
+
+            if (pocketPiece) {
+                const r = pocketPiece.getBoundingClientRect();
+                const px = r.left + r.width / 2;
+                const py = r.top + r.height / 2;
+
+                // 1. Mouse down on the <piece> element (bubbles to div.pocket triggering drag(ctrl, e))
+                pocketPiece.dispatchEvent(makeMouseEvt('mousedown', px, py, 1));
+                if (playerPocket) playerPocket.dispatchEvent(makeMouseEvt('mousedown', px, py, 1));
+
+                await new Promise(res => setTimeout(res, 25));
+
+                // 2. Mouse move towards destination square
+                const midX = px + (toCoord.x - px) * 0.3;
+                const midY = py + (toCoord.y - py) * 0.3;
+                document.dispatchEvent(makeMouseEvt('mousemove', midX, midY, 1));
+
+                await new Promise(res => setTimeout(res, 25));
+
+                // 3. Mouse move to exact destination square on board
+                document.dispatchEvent(makeMouseEvt('mousemove', toCoord.x, toCoord.y, 1));
+
+                await new Promise(res => setTimeout(res, 25));
+
+                // 4. Mouse up on destination square to complete drop
+                document.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+                b.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+
+                // 5. Click on target square as fallback
+                await new Promise(res => setTimeout(res, 40));
+                b.dispatchEvent(makeMouseEvt('mousedown', toCoord.x, toCoord.y, 1));
+                b.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+                try {
+                    const toEl = document.elementFromPoint(toCoord.x, toCoord.y);
+                    if (toEl) toEl.click();
+                } catch (e) {}
+
+                return true;
+            }
+
+            return true;
+        }
+
+        const fromCoord = getSquareCoords(b, from, flipped);
+        if (!fromCoord) return false;
+
+        // 1. Mouse down on from square (both on piece and on board)
+        const fromEl = document.elementFromPoint(fromCoord.x, fromCoord.y) || b;
+        fromEl.dispatchEvent(makeMouseEvt('mousedown', fromCoord.x, fromCoord.y, 1));
+        b.dispatchEvent(makeMouseEvt('mousedown', fromCoord.x, fromCoord.y, 1));
+
+        await new Promise(r => setTimeout(r, 20));
+
+        // 2. Mouse move on document to exceed Chessground's drag threshold (>3px)
+        const midX = fromCoord.x + (toCoord.x - fromCoord.x) * 0.25;
+        const midY = fromCoord.y + (toCoord.y - fromCoord.y) * 0.25;
+        document.dispatchEvent(makeMouseEvt('mousemove', midX, midY, 1));
+
+        await new Promise(r => setTimeout(r, 20));
+
+        // 3. Mouse move to destination square
+        document.dispatchEvent(makeMouseEvt('mousemove', toCoord.x, toCoord.y, 1));
+
+        await new Promise(r => setTimeout(r, 20));
+
+        // 4. Mouse up on document (where Chessground binds end handler) and on to square
+        const toEl = document.elementFromPoint(toCoord.x, toCoord.y) || b;
+        document.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+        b.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+        toEl.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+
+        // 5. Dual fallback: click-to-move sequence
+        await new Promise(r => setTimeout(r, 30));
+        b.dispatchEvent(makeMouseEvt('mousedown', toCoord.x, toCoord.y, 1));
+        b.dispatchEvent(makeMouseEvt('mouseup', toCoord.x, toCoord.y, 0));
+        try { toEl.click(); } catch (e) {}
+
+        const isPromotion = promo !== null || ((from[1] === '7' && to[1] === '8') || (from[1] === '2' && to[1] === '1'));
+        if (isPromotion) {
+            await waitForAndPromote(promo || 'q');
+        }
+
+        return true;
+    }
+
+    async function executeMove(moveStr, b, flipped, ackPromise) {
+        if (!moveStr || moveStr.length < 4 || !b) return false;
+
+        const isDrop = moveStr.includes('@');
+        let from, to;
+        if (isDrop) {
+            from = moveStr.slice(0, 2);
+            to = moveStr.slice(2, 4).toLowerCase();
+        } else {
+            from = moveStr.slice(0, 2).toLowerCase();
+            to = moveStr.slice(2, 4).toLowerCase();
+        }
+        const promo = (!isDrop && moveStr.length > 4 && !moveStr.includes(',')) ? moveStr[4].toLowerCase() : null;
+
+        // Duck chess: e.g. "e2e4,c3" or "e2e4,e4c3"
+        const duckMatch = moveStr.match(/,[a-h]?[1-8]?([a-h][1-8])$/);
+        const duckTo = duckMatch ? duckMatch[1].toLowerCase() : null;
+
+        const uci = isDrop ? (moveStr[0].toUpperCase() + '@' + to) : (from + to + (promo ? promo.toLowerCase() : ''));
+
+        console.log(`[AutoMove] Attempting: ${from} -> ${to}${promo ? ' (' + promo + ')' : ''}${duckTo ? ' [Duck: ' + duckTo + ']' : ''}`);
+
+        // Platform-specific: Endgame.ai
+        if (SITE === 'endgame') {
+            const moved = await makeEndgameMove(from, to, promo, b);
+            return moved;
+        }
+
+        // Platform-specific: Lichess
+        if (SITE === 'lichess') {
+            window.dispatchEvent(new CustomEvent('sa-page-move', { detail: { from, to, promo, uci } }));
+            const moved = await makeLichessMoveDOM(from, to, promo, b, flipped, isDrop);
+            return moved;
+        }
+
+        // Method 1: Page-bridge (runs in MAIN world with direct board.game access)
+        window.dispatchEvent(new CustomEvent('sa-page-move', { detail: { from, to, promo, duckTo, uci } }));
+        if (ackPromise) {
+            const ok = await ackPromise;
+            if (ok) {
+                console.log(`[AutoMove] Move executed via page-bridge: ${from}${to}`);
+                return true;
+            }
+        }
+
+        // Method 2: Physical drag-and-drop pointer & mouse emulation
+        const toCoord = getSquareCoords(b, to, flipped);
+        if (!toCoord) return false;
+
+        let fromEl = null;
+        let toEl = null;
+        let fromCoord = null;
+
+        if (isDrop) {
+            const role = moveStr[0].toLowerCase();
+            const roleName = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen' }[role] || 'pawn';
+            const myColor = flipped ? 'b' : 'w';
+
+            // Find piece with count > 0 in the player's usable pocket
+            const usablePockets = [
+                document.querySelector('.pocket.usable'),
+                document.querySelector(flipped ? '.pocket.bottom, .pocket:not(.top)' : '.pocket.bottom, .pocket:not(.top)'),
+                document.querySelector(`.pocket.${myColor === 'w' ? 'white' : 'black'}`),
+                document.querySelector(`.crazyhouse-pocket.bottom, .crazyhouse-pocket.${myColor === 'w' ? 'white' : 'black'}`),
+                document.querySelector('.crazyhouse-pocket, .pocket-row')
+            ].filter(Boolean);
+
+            for (const pocket of usablePockets) {
+                const candidates = pocket.querySelectorAll('piece, [data-role], .piece, div');
+                for (const p of candidates) {
+                    const cls = p.className || '';
+                    const matchRole = cls.includes(roleName) || cls.includes(role) || p.dataset.role === roleName || p.dataset.role === role;
+                    const count = parseInt(p.dataset.nb || p.getAttribute('data-nb') || '1', 10);
+                    if (matchRole && count > 0) {
+                        fromEl = p;
+                        break;
+                    }
+                }
+                if (fromEl) break;
+            }
+
+            // Fallback: search all pieces with count > 0
+            if (!fromEl) {
+                const all = document.querySelectorAll('.pocket piece, .pocket [data-role], [class*="pocket"] [class*="piece"]');
+                for (const p of all) {
+                    const cls = p.className || '';
+                    const count = parseInt(p.dataset.nb || '1', 10);
+                    if ((cls.includes(roleName) || cls.includes(role)) && count > 0) {
+                        fromEl = p;
+                        break;
+                    }
+                }
+            }
+
+            if (fromEl) {
+                const r = fromEl.getBoundingClientRect();
+                fromCoord = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }
+        } else {
+            fromCoord = getSquareCoords(b, from, flipped);
+            if (SITE === 'chesscom') {
+                const fNum = 'abcdefgh'.indexOf(from[0]) + 1;
+                fromEl = b.querySelector(`.piece.square-${fNum}${from[1]}`);
+            }
+        }
+        if (!fromCoord) return false;
+
+        if (SITE === 'chesscom') {
+            const tNum = 'abcdefgh'.indexOf(to[0]) + 1;
+            toEl = b.querySelector(`.hint.square-${tNum}${to[1]}`) ||
+                   b.querySelector(`.capture-hint.square-${tNum}${to[1]}`) ||
+                   b.querySelector(`.piece.square-${tNum}${to[1]}`);
+        }
+
+        const startEl = fromEl || document.elementFromPoint(fromCoord.x, fromCoord.y) || b;
+        
+        // Pointer down
+        const downEvt = {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: fromCoord.x, clientY: fromCoord.y, screenX: fromCoord.x, screenY: fromCoord.y,
+            pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1
+        };
+        startEl.dispatchEvent(new PointerEvent('pointerdown', downEvt));
+        startEl.dispatchEvent(new MouseEvent('mousedown', downEvt));
+
+        await new Promise(r => setTimeout(r, 25));
+
+        // Drag move in 3 interpolated steps
+        for (let i = 1; i <= 3; i++) {
+            const t = i / 3;
+            const curX = fromCoord.x + (toCoord.x - fromCoord.x) * t;
+            const curY = fromCoord.y + (toCoord.y - fromCoord.y) * t;
+            const moveEvt = {
+                bubbles: true, cancelable: true, composed: true, view: window,
+                clientX: curX, clientY: curY, screenX: curX, screenY: curY,
+                pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1
+            };
+            window.dispatchEvent(new PointerEvent('pointermove', moveEvt));
+            window.dispatchEvent(new MouseEvent('mousemove', moveEvt));
+            await new Promise(r => setTimeout(r, 15));
+        }
+
+        const endEl = toEl || document.elementFromPoint(toCoord.x, toCoord.y) || b;
+        const upEvt = {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: toCoord.x, clientY: toCoord.y, screenX: toCoord.x, screenY: toCoord.y,
+            pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0
+        };
+        endEl.dispatchEvent(new PointerEvent('pointerup', upEvt));
+        endEl.dispatchEvent(new MouseEvent('mouseup', upEvt));
+        endEl.dispatchEvent(new MouseEvent('click', upEvt));
+
+        // Fallback: Click-to-move
+        await new Promise(r => setTimeout(r, 40));
+        startEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, clientX: fromCoord.x, clientY: fromCoord.y }));
+        await new Promise(r => setTimeout(r, 60));
+        endEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, clientX: toCoord.x, clientY: toCoord.y }));
+
+        const isPromotion = promo !== null || (!isDrop && ((from[1] === '7' && to[1] === '8') || (from[1] === '2' && to[1] === '1')));
+        if (isPromotion) {
+            waitForAndPromote(promo || 'q');
+        }
+
+        if (duckTo) {
+            await new Promise(r => setTimeout(r, 120));
+            const duckCoord = getSquareCoords(b, duckTo, flipped);
+            if (duckCoord) {
+                const duckTarget = document.elementFromPoint(duckCoord.x, duckCoord.y) || b;
+                const dOpts = {
+                    bubbles: true, cancelable: true, composed: true, view: window,
+                    clientX: duckCoord.x, clientY: duckCoord.y,
+                    pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1
+                };
+                duckTarget.dispatchEvent(new PointerEvent('pointerdown', dOpts));
+                duckTarget.dispatchEvent(new MouseEvent('mousedown', dOpts));
+                duckTarget.dispatchEvent(new PointerEvent('pointerup', { ...dOpts, buttons: 0 }));
+                duckTarget.dispatchEvent(new MouseEvent('mouseup', { ...dOpts, buttons: 0 }));
+                duckTarget.dispatchEvent(new MouseEvent('click', { ...dOpts, buttons: 0 }));
+            }
+        }
+
+        return true;
+    }
+
+    function tickAutoMove() {
+        if (!autoMoveEnabled || isMoving) return;
+        if (SITE === 'endgame' && egSecret.secret === true && !egSecret.ownSquare) {
+            autoSelectSecretQueen(lastEGFlipped);
+        }
+        if (isGameOver()) {
+            if (autoMoveTimer) { clearTimeout(autoMoveTimer); autoMoveTimer = null; }
+            pendingMoveFen = null;
+            return;
+        }
+
+        const pos = readBoard();
+        if (!pos || !pos.fen || pos.note) return;
+
+        const fenParts = pos.fen.split(' ');
+        const turn = fenParts[1] || currentTurn;
+        const myColor = pos.flipped ? 'b' : 'w';
+
+        const isPuzzle = SITE === 'lichess' && (/^\/(training|streak|storm|racer)\b/.test(location.pathname) || !!document.querySelector('main.puzzle, .puzzle__board, [class*="puzzle"], .streak, .storm, .racer'));
+
+        // Opponent's turn -> clear pending timer (in puzzles, player always solves for active turn)
+        if (!isPuzzle && turn !== myColor) {
+            if (autoMoveTimer) {
+                clearTimeout(autoMoveTimer);
+                autoMoveTimer = null;
+                pendingMoveFen = null;
+            }
+            return;
+        }
+
+        // Our turn! Check position placement
+        const boardPlacement = fenParts[0] + ' ' + fenParts[1];
+        if (lastAutoMoveFen === boardPlacement) return;
+        if (autoMoveTimer !== null && pendingMoveFen === boardPlacement) return;
+
+        if (autoMoveTimer !== null && pendingMoveFen !== boardPlacement) {
+            clearTimeout(autoMoveTimer);
+            autoMoveTimer = null;
+        }
+
+        // 0.5 - 1.0 second delay (500ms - 1000ms)
+        const delay = Math.floor(Math.random() * 501) + 500;
+        pendingMoveFen = boardPlacement;
+
+        autoMoveTimer = setTimeout(async () => {
+            autoMoveTimer = null;
+            pendingMoveFen = null;
+
+            if (!autoMoveEnabled || isMoving || isGameOver()) return;
+
+            const curPos = readBoard();
+            if (!curPos || !curPos.fen) return;
+            const curParts = curPos.fen.split(' ');
+            const curPlacement = curParts[0] + ' ' + curParts[1];
+            if (curPlacement !== boardPlacement) return;
+            if (!isPuzzle && curParts[1] !== myColor) return;
+
+            const bestMove = moves && moves[0];
+            if (!bestMove || bestMove.length < 4) {
+                // If engine hasn't delivered bestmove yet, recheck in 100ms
+                autoMoveTimer = setTimeout(() => {
+                    autoMoveTimer = null;
+                    tickAutoMove();
+                }, 100);
+                return;
+            }
+
+            isMoving = true;
+            let moveSucceeded = false;
+
+            const ackPromise = new Promise(resolve => {
+                const handler = (e) => {
+                    window.removeEventListener('sa-page-move-ack', handler);
+                    resolve(e.detail?.ok);
+                };
+                window.addEventListener('sa-page-move-ack', handler);
+                setTimeout(() => {
+                    window.removeEventListener('sa-page-move-ack', handler);
+                    resolve(false);
+                }, 150);
+            });
+
+            try {
+                await executeMove(bestMove, curPos.board, curPos.flipped, ackPromise);
+
+                // Wait and verify if board position actually updated
+                await new Promise(r => setTimeout(r, 220));
+                const afterPos = readBoard();
+                if (afterPos && afterPos.fen) {
+                    const afterParts = afterPos.fen.split(' ');
+                    const afterPlacement = afterParts[0] + ' ' + afterParts[1];
+                    if (afterPlacement !== boardPlacement) {
+                        moveSucceeded = true;
+                        lastAutoMoveFen = boardPlacement;
+                    }
+                }
+            } catch (err) {
+                console.error('[AutoMove] Execution error:', err);
+            } finally {
+                if (!moveSucceeded) {
+                    // Do not lock lastAutoMoveFen if move didn't happen!
+                    lastAutoMoveFen = null;
+                }
+                setTimeout(() => { isMoving = false; }, 300);
+            }
+        }, delay);
+    }
+
+    function toggleAutoMove() {
+        autoMoveEnabled = !autoMoveEnabled;
+        if (autoMoveEnabled) {
+            let btn = document.getElementById("sa-btn");
+            if (!iv && btn) {
+                btn.click();
+            }
+            installInlineBridge();
+            showToast('⚡ <b>AUTO MOVE: AKTIF</b><br>Bidak jalan otomatis (0.5 - 1.0s) dari langkah terbaik', '#064e3b', '#10b981', 3000);
+        } else {
+            if (autoMoveTimer) {
+                clearTimeout(autoMoveTimer);
+                autoMoveTimer = null;
+            }
+            pendingMoveFen = null;
+            showToast('⏹️ <b>AUTO MOVE: NONAKTIF</b>', '#450a0a', '#ef4444', 2500);
+        }
+        updateAutoMoveUI();
+    }
+
+    function updateAutoMoveUI() {
+        const btn = document.getElementById("sa-automove-btn");
+        if (!btn) return;
+        if (autoMoveEnabled) {
+            btn.innerHTML = "Auto: ON [B]";
+            btn.style.background = "#059669";
+            btn.style.color = "#ffffff";
+            btn.style.borderColor = "#10b981";
+            btn.style.boxShadow = "0 0 10px rgba(16, 185, 129, 0.4)";
+        } else {
+            btn.innerHTML = "Auto: OFF [B]";
+            btn.style.background = "#262421";
+            btn.style.color = "#94a3b8";
+            btn.style.borderColor = "#3d3b38";
+            btn.style.boxShadow = "none";
+        }
+    }
+
     // --------------------------------------------------------------------- ui
 
     function mountUI() {
@@ -2290,20 +3314,50 @@ if (globalThis.name !== 'em-pthread') {
             if (SITE === 'chesscom' && !variantsBoard) {
                 let host = document.querySelector(".board-layout-main");
                 if (host) {
-                    host.insertAdjacentHTML('afterbegin', `<div id="sa-wrap" style="display:flex;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;"><button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button></div>`);
+                    host.insertAdjacentHTML('afterbegin', `<div id="sa-wrap" style="display:flex;gap:8px;padding:10px;background:var(--globalBackgroundDark);border-radius:5px;margin-bottom:10px;">
+                        <button id="sa-btn" class="ui_v5-button-component ui_v5-button-primary" style="flex:1">Start Analyzer (Hotkey: A)</button>
+                        <button id="sa-automove-btn" class="ui_v5-button-component ui_v5-button-basic" style="padding:0 14px;background:#262421;color:#94a3b8;border:1px solid #3d3b38;border-radius:5px;font-weight:600;font-size:12px;cursor:pointer;white-space:nowrap;">Auto: OFF [B]</button>
+                    </div>`);
                     document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
+                    document.getElementById("sa-automove-btn").onclick = () => toggleAutoMove();
                 }
             } else if (variantsBoard || (SITE === 'endgame' ? findBoardEG() : SITE === 'lichess' && document.querySelector('cg-board'))) {
-                document.body.insertAdjacentHTML('beforeend', `<div id="sa-wrap" style="position:fixed;bottom:12px;left:12px;z-index:99999;"><button id="sa-btn" style="background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 14px;font:13px sans-serif;cursor:pointer">Start Analyzer (Hotkey: A)</button></div>`);
+                document.body.insertAdjacentHTML('beforeend', `<div id="sa-wrap" style="position:fixed;bottom:12px;left:12px;z-index:99999;display:flex;gap:8px;">
+                    <button id="sa-btn" style="background:#262421;color:#e0e0e0;border:1px solid #3d3b38;border-radius:8px;padding:8px 14px;font:13px sans-serif;cursor:pointer">Start Analyzer (Hotkey: A)</button>
+                    <button id="sa-automove-btn" style="background:#262421;color:#94a3b8;border:1px solid #3d3b38;border-radius:8px;padding:8px 12px;font:12px sans-serif;font-weight:600;cursor:pointer;white-space:nowrap;">Auto: OFF [B]</button>
+                </div>`);
                 document.getElementById("sa-btn").onclick = e => toggle(e.currentTarget);
+                document.getElementById("sa-automove-btn").onclick = () => toggleAutoMove();
+            }
+        } else if (!document.getElementById("sa-automove-btn")) {
+            let wrap = document.getElementById("sa-wrap");
+            if (wrap) {
+                wrap.insertAdjacentHTML('beforeend', `<button id="sa-automove-btn" style="background:#262421;color:#94a3b8;border:1px solid #3d3b38;border-radius:8px;padding:8px 12px;font:12px sans-serif;font-weight:600;cursor:pointer;white-space:nowrap;">Auto: OFF [B]</button>`);
+                document.getElementById("sa-automove-btn").onclick = () => toggleAutoMove();
             }
         }
+        updateAutoMoveUI();
     }
 
     setInterval(() => {
         mountUI();
         queueRelayTick();
     }, 1500);
+
+    setInterval(() => {
+        if (autoMoveEnabled) {
+            tickAutoMove();
+        }
+        // Continuous auto-promote ONLY if a promotion dialog is actually present on screen
+        if (hasPromotionModal()) {
+            const bestPromo = (moves && moves[0] && moves[0].length > 4 ? moves[0][4] : 'q');
+            handlePromotion(bestPromo);
+        }
+        // Auto-select secret queen if in selection phase on Endgame.ai
+        if (autoMoveEnabled && SITE === 'endgame' && egSecret.secret === true && !egSecret.ownSquare) {
+            autoSelectSecretQueen(lastEGFlipped);
+        }
+    }, 40);
 
     window.addEventListener('keydown', e => {
         if (e.ctrlKey && e.shiftKey && ['c', 'x'].includes(e.key.toLowerCase())) {
@@ -2322,6 +3376,11 @@ if (globalThis.name !== 'em-pthread') {
                 e.stopImmediatePropagation();
                 btn.click();
             }
+        }
+        if (e.key.toLowerCase() === 'b') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            toggleAutoMove();
         }
         if (e.key === 'Insert') {
             e.preventDefault();
