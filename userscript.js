@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.10
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -1692,6 +1692,8 @@ if (globalThis.name !== 'em-pthread') {
     let relayEndSent = false;
     // the requests carrying the last position sent, which the end of the game waits for
     let relayPublished = Promise.resolve();
+    // what the end of a variants-server game carries: its last position, in case that went astray
+    let relayEndFields = {};
     const RELAY_END_WAIT_MS = 3000;
     let relayBoard = null;
     let relayQueued = false;
@@ -1933,6 +1935,7 @@ if (globalThis.name !== 'em-pthread') {
         let gameId = SITE === 'endgame' ? location.pathname.match(/^\/game\/([\w-]+)/)?.[1] : undefined;
         // a variants game goes with the position its store has, which its board can misdraw
         let variantFields = cv ? { variant: cv.variant, startFen: cv.start, ucis: cv.ucis } : {};
+        relayEndFields = cv ? { site: SITE, fen: cv.fen, ...variantFields, white: players.white, black: players.black, bottom: players.bottom } : {};
         relayPublished = publish({ v: 1, type: 'pos', site: SITE, gameId, fen: cv ? cv.fen : pos.fen, moves: playedMoves, ...variantFields, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
         return true;
     }
@@ -1974,7 +1977,7 @@ if (globalThis.name !== 'em-pthread') {
         relayEndSent = true;
         let last = relayPublished;
         Promise.race([last, new Promise(r => setTimeout(r, RELAY_END_WAIT_MS))]).then(() => {
-            if (relayEndSent && relayPublished === last) publish({ v: 1, type: 'end', ts: Date.now() });
+            if (relayEndSent && relayPublished === last) publish({ v: 1, type: 'end', ...relayEndFields, ts: Date.now() });
         });
     }
 
