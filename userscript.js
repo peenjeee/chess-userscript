@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.8
+// @version      3.9
 // @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -1321,10 +1321,11 @@ if (globalThis.name !== 'em-pthread') {
     const CV_GAME = 'chess-analyzer-variants-game';
 
     // Runs in the page. Each move is [from, to, promotion, duck square, FEN
-    // after]: a duck chess turn is the move and then the duck, and the FEN
+    // after, castle]: a duck chess turn is the move and then the duck, and the FEN
     // after a move is only kept where the relay needs it (a Seirawan piece
     // brought in, the end of Setup Chess's drops). Moves without squares (a
     // resignation, a timeout, a side done with its setup) are left out.
+    // lastFen is the position after the last move, for a board the page hides.
     function variantsGameReader(readEvent, gameEvent) {
         document.addEventListener(readEvent, () => {
             let game = null;
@@ -1333,18 +1334,20 @@ if (globalThis.name !== 'em-pthread') {
                 let g = stores.get('game');
                 let start = g.startFen || '';
                 let keepFen = m => /seirawanDrops/.test(start) || (/setupPoints/.test(start) && /^@/.test(m.from));
+                let played = (stores.get('moves').moves || [])
+                    .filter(m => !m.isIllegal && !(m.inVariation >= 0))
+                    .filter(m => { let [move] = m.multimoves || [m]; return move.from && move.to; });
                 game = {
                     gameNr: g.gameNr,
                     startFen: start,
                     gameOver: !!g.gameOver,
                     players: (g.players || []).map(p => (p && p.username) || ''),
-                    moves: (stores.get('moves').moves || [])
-                        .filter(m => !m.isIllegal && !(m.inVariation >= 0))
+                    lastFen: played.length ? played[played.length - 1].fen || '' : '',
+                    moves: played
                         .map(m => {
                             let [move, duck] = m.multimoves || [m];
-                            return [move.from || '', move.to || '', move.promoteTo || '', (duck && duck.piece === 'Θ' && duck.to) || '', keepFen(move) ? m.fen || '' : ''];
+                            return [move.from, move.to, move.promoteTo || '', (duck && duck.piece === 'Θ' && duck.to) || '', keepFen(move) ? m.fen || '' : '', move.castle || ''];
                         })
-                        .filter(m => m[0] && m[1])
                 };
             } catch (e) {}
             document.dispatchEvent(new CustomEvent(gameEvent, { detail: JSON.stringify(game) }));
@@ -1464,26 +1467,42 @@ if (globalThis.name !== 'em-pthread') {
 
     // One move as UCI. A drop names its piece ("@0_rP" from the bank); a duck
     // chess turn is the move, then where the duck goes; a Seirawan piece
-    // brought in shows on the square its piece left in the position after.
+    // brought in shows on the square its piece left in the position after. A
+    // castle goes to the king's own square, though a live game's store has the
+    // king going to its rook; a Chess960 castle stays king to rook.
     function cvUci(slug, move, letters) {
-        let [from, to, promotion, duck, after] = move;
+        let [from, to, promotion, duck, after, castle] = move;
         let target = square8x8(to);
         if (!target) return null;
         let drop = /^@\d_.(.)$/u.exec(from);
         if (drop) return (letters[drop[1]] || drop[1]).toUpperCase() + '@' + target;
         let source = square8x8(from);
         if (!source) return null;
+        let rook = '';
+        if (castle && slug !== 'chess960') {
+            let kingside = target[0] > source[0];
+            rook = (kingside ? 'h' : 'a') + source[1];
+            target = (kingside ? 'g' : 'c') + source[1];
+        }
         let uci = source + target + (promotion ? (letters[promotion] || promotion).toLowerCase() : '');
         if (duck) {
             let duckTo = square8x8(duck);
             return duckTo ? uci + ',' + target + duckTo : null;
         }
         if (slug === 'seirawan-chess' && after) {
-            let rows = placement8x8(after, letters)?.split('/').map(r => r.replace(/\d/g, d => '1'.repeat(+d)));
-            let gated = rows?.[8 - +source[1]]?.[source.charCodeAt(0) - 97];
-            if (gated && /^[HEhe]$/.test(gated)) uci += gated.toLowerCase();
+            // a castle may bring the piece in on the rook's square, written rook to king
+            let onKing = gatedAt(after, source, letters), onRook = rook && gatedAt(after, rook, letters);
+            if (onKing) uci += onKing;
+            else if (onRook) uci = rook + source + onRook;
         }
         return uci;
+    }
+
+    // The Seirawan piece, h or e, on a square of a position; '' for none
+    function gatedAt(fen, square, letters) {
+        let rows = placement8x8(fen, letters)?.split('/').map(r => r.replace(/\d/g, d => '1'.repeat(+d)));
+        let piece = rows?.[8 - +square[1]]?.[square.charCodeAt(0) - 97];
+        return piece && /^[HEhe]$/.test(piece) ? piece.toLowerCase() : '';
     }
 
     // A square of that grid on the 8x8 board: g4 is d1
@@ -1501,10 +1520,10 @@ if (globalThis.name !== 'em-pthread') {
     }
 
     // The game a variants page shows, for the web app: its variant, its start
-    // FEN and its moves as UCI (a Chess960 castle goes from the king to its
-    // rook, as the server writes it). Setup Chess starts from the position its
-    // drops built, once both sides are done. Null on other pages, for other
-    // variants and while the game loads.
+    // FEN, the FEN of the position now and its moves as UCI (a Chess960 castle
+    // goes from the king to its rook, as the server writes it). Setup Chess
+    // starts from the position its drops built, once both sides are done. Null
+    // on other pages, for other variants and while the game loads.
     function variantsGame() {
         let slug = location.pathname.match(/^\/variants\/([^/]+)\//)?.[1];
         let variant = CV_RELAY[slug];
@@ -1520,10 +1539,11 @@ if (globalThis.name !== 'em-pthread') {
             start = moves[n - 1][4];
             moves = moves.slice(n);
         }
-        let fen = cvStartFen(slug, start || '', letters);
+        let startFen = cvStartFen(slug, start || '', letters);
+        let fen = cvStartFen(slug, g.lastFen || start || '', letters);
         let ucis = moves.map(m => cvUci(slug, m, letters));
-        if (!fen || ucis.includes(null)) return null;
-        return { variant, start: fen, ucis, over: g.gameOver, white: g.players[0] || '', black: g.players[2] || '' };
+        if (!startFen || !fen || ucis.includes(null)) return null;
+        return { variant, start: startFen, fen, ucis, over: g.gameOver, white: g.players[0] || '', black: g.players[2] || '' };
     }
 
     // The game to ask about, as { id, url, read }: read takes the response and
@@ -1670,6 +1690,9 @@ if (globalThis.name !== 'em-pthread') {
     let relayMoveHistory = [];
     let relayGamePath = location.pathname;
     let relayEndSent = false;
+    // the requests carrying the last position sent, which the end of the game waits for
+    let relayPublished = Promise.resolve();
+    const RELAY_END_WAIT_MS = 3000;
     let relayBoard = null;
     let relayQueued = false;
     const relayBoardObserver = new MutationObserver(queueRelayTick);
@@ -1857,24 +1880,27 @@ if (globalThis.name !== 'em-pthread') {
         return [];
     }
 
+    // Resolves once every relay has answered or failed
     function publish(payload) {
         let body = JSON.stringify(payload);
+        let requests = [];
         for (let base of RELAY_URLS) {
             if (hasGM) {
-                gmRequest({
+                requests.push(gmRequest({
                     method: 'POST',
                     url: base + sessionId,
                     data: body,
                     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
-                }).catch(err => console.warn('relay publish failed', base, err));
+                }).catch(err => console.warn('relay publish failed', base, err)));
             } else {
-                fetch(base + sessionId, {
+                requests.push(fetch(base + sessionId, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body
-                }).catch(err => console.warn('relay publish failed', base, err));
+                }).catch(err => console.warn('relay publish failed', base, err)));
             }
         }
+        return Promise.all(requests);
     }
 
     function keepFullRelayHistory(playedMoves) {
@@ -1905,19 +1931,33 @@ if (globalThis.name !== 'em-pthread') {
         let players = cv ? { white: cv.white, black: cv.black, bottom: pos.flipped ? 'black' : 'white' } : readPlayers(pos.flipped);
         // Lets the web app load the finished game from endgame.ai by id
         let gameId = SITE === 'endgame' ? location.pathname.match(/^\/game\/([\w-]+)/)?.[1] : undefined;
+        // a variants game goes with the position its store has, which its board can misdraw
         let variantFields = cv ? { variant: cv.variant, startFen: cv.start, ucis: cv.ucis } : {};
-        publish({ v: 1, type: 'pos', site: SITE, gameId, fen: pos.fen, moves: playedMoves, ...variantFields, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
+        relayPublished = publish({ v: 1, type: 'pos', site: SITE, gameId, fen: cv ? cv.fen : pos.fen, moves: playedMoves, ...variantFields, white: players.white, black: players.black, bottom: players.bottom, ts: Date.now() });
         return true;
     }
 
     // Variant games stay out of the relay, since the web app reads a board as
     // standard chess, except a variants-server game sent with its variant and
-    // moves. That one goes even where this script has no engine for its variant.
+    // moves. That one goes even where this script has no engine for its
+    // variant, and even where the page hides its board, as the narrow layout
+    // does once the game is over.
     function readRelayBoard() {
         let pos = readBoard(true);
-        if (!pos || pos.note) return null;
+        if (!pos) return hiddenVariantsBoard();
+        if (pos.note) return null;
         let rules = pos.rules || STANDARD;
         return rules === STANDARD || variantsGame() ? pos : null;
+    }
+
+    // A variants-server game whose board the page hides, read from its store
+    function hiddenVariantsBoard() {
+        let board = document.querySelector('.TheBoard-layers');
+        if (!board || board.getBoundingClientRect().width) return null;
+        let cv = variantsGame();
+        if (!cv) return null;
+        let flipped = document.querySelector('.playerbox-bottom [data-player]')?.dataset.player === '2';
+        return { board, flipped, fen: cv.fen };
     }
 
     function refreshRelayMoves(fen) {
@@ -1926,10 +1966,16 @@ if (globalThis.name !== 'em-pthread') {
         if (publishRelayPosition(pos) && isGameOver()) sendRelayEnd();
     }
 
+    // The end waits for the last position: sent together, the end could reach
+    // the relay first, and the relay drops a message older than one it has. A
+    // position sent while it waits replaces this end with the one after it.
     function sendRelayEnd() {
         if (relayEndSent) return;
         relayEndSent = true;
-        publish({ v: 1, type: 'end', ts: Date.now() });
+        let last = relayPublished;
+        Promise.race([last, new Promise(r => setTimeout(r, RELAY_END_WAIT_MS))]).then(() => {
+            if (relayEndSent && relayPublished === last) publish({ v: 1, type: 'end', ts: Date.now() });
+        });
     }
 
     function relayTick() {
