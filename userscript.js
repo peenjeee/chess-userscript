@@ -590,6 +590,7 @@
                                     try {
                                         let json = JSON.parse(frame);
                                         let str = JSON.stringify(json);
+                                        console.log('%c[SA-WSS FRAME]', 'color:#94a3b8;', json.target || json.type, json);
                                         if (json.target === 'secretQueenRevealed' || json.target === 'secretQueenSelected' || str.includes('secretQueen') || str.includes('SecretQueen')) {
                                             console.log('%c[SA-WSS SECRET QUEEN DATA]', 'color:#ef4444;font-weight:bold;font-size:13px;', json);
                                             window.dispatchEvent(new CustomEvent('sa-wss-reveal', { detail: json }));
