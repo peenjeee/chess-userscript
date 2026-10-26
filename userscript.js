@@ -499,9 +499,48 @@
     // the overlay and alerts only show once it has said yes
     const SECRET_RETRY_MS = 5000;
     function newSecretState(gameId) {
-        return { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, secret: null, start960: null, retryAt: 0, spectating: false, lastOppPawns: null, queenCapturedNotified: false };
+        return { gameId, boardKey: '', ownSquare: null, revealed: [], inFlight: false, secret: null, start960: null, retryAt: 0, spectating: false, lastOppPawns: null, queenCapturedNotified: false, oppQueenFound: null };
     }
     let egSecret = newSecretState('');
+
+    function extractSecretQueensFromFen(fen) {
+        if (!fen) return { white: null, black: null };
+        let ranks = fen.split(' ')[0].split('/');
+        if (ranks.length !== 8) return { white: null, black: null };
+        let board = {};
+        for (let rIdx = 0; rIdx < 8; rIdx++) {
+            let rankNum = 8 - rIdx;
+            let colIdx = 1;
+            for (let ch of ranks[rIdx]) {
+                if (/\d/.test(ch)) {
+                    colIdx += parseInt(ch, 10);
+                } else {
+                    let sq = String.fromCharCode(colIdx + 96) + rankNum;
+                    board[sq] = ch;
+                    colIdx++;
+                }
+            }
+        }
+        let whiteSQ = Object.keys(board).find(sq => board[sq] === 'Q' && sq !== 'd1') || null;
+        let blackSQ = Object.keys(board).find(sq => board[sq] === 'q' && sq !== 'd8') || null;
+        return { white: whiteSQ, black: blackSQ };
+    }
+
+    function applySecretQueenLeak(oppSQ, oppColor, sourceTag = 'WSS MOVE') {
+        if (!oppSQ || egSecret.oppQueenFound === oppSQ) return;
+        egSecret.oppQueenFound = oppSQ;
+        showToast(`🎯 <b>SECRET QUEEN LAWAN TERDETEKSI (${sourceTag})!</b><br>Petak: <b>${oppSQ.toUpperCase()}</b>!`, '#15803d', '#22c55e', 9000);
+        if (!egSecret.revealed.some(r => r.square === oppSQ)) {
+            egSecret.revealed.push({ color: oppColor, square: oppSQ });
+        }
+        if (lastEGGrid) {
+            let k = ('abcdefgh'.indexOf(oppSQ[0]) + 1) + ',' + oppSQ[1];
+            if (lastEGGrid[k]) {
+                lastEGGrid[k] = lastEGGrid[k][0] + 'q';
+            }
+        }
+        render(lastEGFlipped);
+    }
 
     // Endgame.ai WebSocket (SignalR) real-time sniffer & hook
     if (SITE === 'endgame') {
@@ -527,6 +566,7 @@
                                             window.dispatchEvent(new CustomEvent('sa-wss-reveal', { detail: json }));
                                         } else if (json.target === 'moved') {
                                             console.log('%c[SA-WSS MOVE]', 'color:#10b981;', json.arguments?.[0]);
+                                            window.dispatchEvent(new CustomEvent('sa-wss-move', { detail: json.arguments?.[0] }));
                                         }
                                         } catch {
                                         if (frame.includes('secretqueen') || frame.includes('SecretQueen')) {
@@ -582,12 +622,25 @@
                                         }
                                         render(lastEGFlipped);
                                         } else {
-                                        egSecret.ownSquare = sq;
+                                            egSecret.ownSquare = sq;
                                         }
                                         }
                                         }
                                         });
-    }
+
+                                        window.addEventListener('sa-wss-move', (e) => {
+                                        let moveStr = e.detail;
+                                        if (typeof moveStr !== 'string') return;
+                                        let mFen = (moveStr.match(/[?&]fen=([^&\s]+)/) || [])[1];
+                                        if (!mFen) return;
+                                        let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
+                                        let oppColor = lastEGFlipped ? 'w' : 'b';
+                                        let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
+                                        if (oppSQ) {
+                                        applySecretQueenLeak(oppSQ, oppColor, 'WSS MOVE FEN');
+                                        }
+                                        });
+                                        }
 
     function checkRevealedCaptures(revealed) {
         if (!Array.isArray(revealed) || egSecret.queenCapturedNotified) return;
@@ -659,7 +712,23 @@
                 if (!g || egSecret !== state) return;
                 state.secret = g.variant === 'SecretQueen';
                 state.start960 = g.variant === 'Chess960' && typeof g.startingFen === 'string' ? g.startingFen : null;
-                // the overlay was held back until now, and the board may not move again soon
+
+                // Check if public moves array leaks secret queens
+                if (state.secret && Array.isArray(g.moves) && g.moves.length > 0) {
+                    for (let mStr of g.moves) {
+                        let mFen = (mStr.match(/[?&]fen=([^&\s]+)/) || [])[1];
+                        if (mFen) {
+                            let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
+                            let oppColor = lastEGFlipped ? 'w' : 'b';
+                            let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
+                            if (oppSQ) {
+                                applySecretQueenLeak(oppSQ, oppColor, 'GAME MOVE FEN');
+                            }
+                        }
+                    }
+                }
+
+                // overlay held back until now, board may not move again soon
                 if (state.secret) render(lastEGFlipped);
             })
             .catch(() => {})
