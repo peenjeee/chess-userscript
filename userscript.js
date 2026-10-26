@@ -553,15 +553,27 @@
         .then(r => r.ok ? r.json() : null)
         .then(g => {
             if (g && Array.isArray(g.moves) && g.moves.length > 0) {
-                for (let mStr of g.moves) {
+                let oppColor = lastEGFlipped ? 'w' : 'b';
+                // 1. Scan from moves backwards for any queen moves from pawn starting squares
+                for (let i = g.moves.length - 1; i >= 0; i--) {
+                    let mStr = g.moves[i];
+                    let mPiece = (mStr.match(/[?&]p=([^&\s]+)/) || [])[1];
+                    let mFrom = (mStr.match(/[?&]cf=([^&\s]+)/) || [])[1];
                     let mFen = (mStr.match(/[?&]fen=([^&\s]+)/) || [])[1];
+
+                    // Direct queen move by opponent piece
+                    if (mPiece === 'q' + oppColor && mFrom) {
+                        applySecretQueenLeak(mFrom, oppColor, 'OPPONENT QUEEN MOVE');
+                        return;
+                    }
+
+                    // Check FEN for any unmasked queen
                     if (mFen) {
                         let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
-                        let oppColor = lastEGFlipped ? 'w' : 'b';
                         let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
                         if (oppSQ) {
-                            applySecretQueenLeak(oppSQ, oppColor, 'MOVE 1 FEN');
-                            break;
+                            applySecretQueenLeak(oppSQ, oppColor, 'GAME FEN LEAK');
+                            return;
                         }
                     }
                 }
@@ -797,12 +809,11 @@
             }).catch(() => {});
         }
         let token = egAccessToken();
-        if (!token) return;
         state.inFlight = true;
         state.boardKey = boardKey;
-        fetch('/api/games/' + encodeURIComponent(state.gameId) + '/secret-queen', {
-            headers: { 'Authorization': 'Bearer ' + token, 'x-eg-platform': 'web' }
-        })
+        let headers = { 'x-eg-platform': 'web' };
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+        fetch('/api/games/' + encodeURIComponent(state.gameId) + '/secret-queen', { headers })
             .then(r => {
                 if (r.status === 404) return { spectating: true };
                 return r.ok ? r.json() : null;
@@ -877,12 +888,20 @@
         if (pieces.filter(p => p === 'wk').length !== 1 || pieces.filter(p => p === 'bk').length !== 1) return null;
 
         // Secret Queen: hidden queen looks like a pawn on board;
-        // engine must know it moves as a queen (own square + revealed from API)
+        // engine must know it moves as a queen (own square + revealed from API + oppQueenFound)
         refreshOwnSecretQueen(Object.entries(grid).sort().join(';'));
         let own = egSecret.ownSquare;
         if (own) {
             let key = ('abcdefgh'.indexOf(own[0]) + 1) + ',' + own[1];
             if (grid[key] && grid[key][1] === 'p') grid[key] = grid[key][0] + 'q';
+        }
+        if (egSecret.oppQueenFound) {
+            let oppSQ = egSecret.oppQueenFound;
+            let oppColor = flipped ? 'w' : 'b';
+            let key = ('abcdefgh'.indexOf(oppSQ[0]) + 1) + ',' + oppSQ[1];
+            if (grid[key] && grid[key][1] === 'p') {
+                grid[key] = oppColor + 'q';
+            }
         }
         if (Array.isArray(egSecret.revealed)) {
             egSecret.revealed.forEach(r => {
