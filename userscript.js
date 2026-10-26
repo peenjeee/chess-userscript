@@ -990,8 +990,28 @@
             let c = 'abcdefgh'.indexOf(sq[0]) + 1;
             let r = +sq[1];
             let p = pt(c, r);
-            out += `<circle cx="${p.x}" cy="${p.y}" r="5.6" fill="#7c3aed" fill-opacity="0.45" stroke="#c084fc" stroke-width="1.3" />`;
+            out += `<circle cx="${p.x}" cy="${p.y}" r="5.6" fill="#7c3aed" fill-opacity="0.5" stroke="#c084fc" stroke-width="1.3" />`;
             out += `<text x="${p.x}" y="${p.y}" text-anchor="middle" dominant-baseline="central" font-size="6.5">👑</text>`;
+        } else {
+            // Statistical Heatmap of Secret Queen choices from real game telemetry
+            let probs = oppColor === 'w' 
+                ? { g2: '50%', a2: '25%', c2: '17%' }
+                : { g7: '42%', e7: '25%', d7: '17%' };
+
+            for (let sq in probs) {
+                let c = 'abcdefgh'.indexOf(sq[0]) + 1;
+                let r = +sq[1];
+                let pieceAtSq = lastEGGrid[c + ',' + r];
+                // Only show badge if the opponent pawn is still on this square
+                if (pieceAtSq === oppColor + 'p') {
+                    let p = pt(c, r);
+                    let isTop = probs[sq] === '50%' || probs[sq] === '42%';
+                    let borderCol = isTop ? '#eab308' : '#94a3b8';
+                    let bgCol = isTop ? 'rgba(234, 179, 8, 0.25)' : 'rgba(100, 116, 139, 0.2)';
+                    out += `<circle cx="${p.x}" cy="${p.y - 4.5}" r="3.2" fill="${bgCol}" stroke="${borderCol}" stroke-width="0.6" />`;
+                    out += `<text x="${p.x}" y="${p.y - 4.3}" text-anchor="middle" dominant-baseline="central" font-size="2.6" font-weight="bold" fill="#fff">${probs[sq]}</text>`;
+                }
+            }
         }
 
         let pawnsToCast = egSecret.oppQueenFound
