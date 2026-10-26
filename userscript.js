@@ -503,6 +503,58 @@
     }
     let egSecret = newSecretState('');
 
+    // Endgame.ai WebSocket (SignalR) real-time sniffer & hook
+    if (SITE === 'endgame') {
+        try {
+            let hookScript = document.createElement('script');
+            hookScript.textContent = `(${function() {
+                if (window.__saWSHooked) return;
+                window.__saWSHooked = true;
+                const OrigWS = window.WebSocket;
+                window.WebSocket = function(url, protocols) {
+                    const ws = new OrigWS(url, protocols);
+                    if (typeof url === 'string' && url.includes('gamehub')) {
+                        console.log('%c[SA-WSS] Connected to gamehub:', 'color:#3b82f6;font-weight:bold;', url);
+                        ws.addEventListener('message', (e) => {
+                            if (typeof e.data === 'string') {
+                                let frames = e.data.split('\x1e').filter(Boolean);
+                                for (let frame of frames) {
+                                    try {
+                                        let json = JSON.parse(frame);
+                                        if (json.target === 'secretQueenRevealed' || json.target === 'secretQueenSelected') {
+                                            console.log('%c[SA-WSS REVEAL EVENT]', 'color:#ef4444;font-weight:bold;font-size:14px;', json);
+                                            window.dispatchEvent(new CustomEvent('sa-wss-reveal', { detail: json }));
+                                        } else if (json.target === 'moved') {
+                                            console.log('%c[SA-WSS MOVE]', 'color:#10b981;', json.arguments?.[0]);
+                                        }
+                                    } catch {
+                                        if (frame.includes('secretqueen') || frame.includes('SecretQueen')) {
+                                            console.log('%c[SA-WSS RAW]', 'color:#f59e0b;font-weight:bold;', frame);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    return ws;
+                };
+                window.WebSocket.prototype = OrigWS.prototype;
+            }})();`;
+            (document.head || document.documentElement).appendChild(hookScript);
+            hookScript.remove();
+        } catch (e) {}
+
+        window.addEventListener('sa-wss-reveal', (e) => {
+            let data = e.detail;
+            if (data?.target === 'secretQueenRevealed') {
+                let arg = data.arguments?.[0];
+                if (arg?.square) {
+                    showToast(`⚡ <b>SECRET QUEEN TERUNGKAP (WSS)!</b><br>Bidak ${arg.color === 'w' ? 'Putih' : 'Hitam'} di petak <b>${arg.square.toUpperCase()}</b> terbuka!`, '#312e81', '#6366f1', 6000);
+                }
+            }
+        });
+    }
+
     function checkRevealedCaptures(revealed) {
         if (!Array.isArray(revealed) || egSecret.queenCapturedNotified) return;
         let oppColor = lastEGFlipped ? 'w' : 'b';
