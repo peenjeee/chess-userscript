@@ -739,6 +739,21 @@
     // change, whatever the answer: the square only moves when your pawn does,
     // and the site refreshes an expired token (401) before the next move.
     function lookUpOwnSquare(state, boardKey) {
+        if (!state.oppQueenFound) {
+            fetchEGGame(state.gameId).then(g => {
+                if (g && Array.isArray(g.moves) && g.moves.length > 0) {
+                    let mFen = (g.moves[0].match(/[?&]fen=([^&\s]+)/) || [])[1];
+                    if (mFen) {
+                        let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
+                        let oppColor = lastEGFlipped ? 'w' : 'b';
+                        let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
+                        if (oppSQ) {
+                            applySecretQueenLeak(oppSQ, oppColor, 'MOVE 1 FEN');
+                        }
+                    }
+                }
+            }).catch(() => {});
+        }
         let token = egAccessToken();
         if (!token) return;
         state.inFlight = true;
@@ -924,7 +939,6 @@
                 oppPawns.push({ c, r });
             }
         }
-        if (oppPawns.length === 0) return "";
 
         let pt = (c, r) => {
             let x = flip ? 9 - c : c;
@@ -932,52 +946,66 @@
             return { x: (x - 1) * 12.5 + 6.25, y: (8 - y) * 12.5 + 6.25 };
         };
 
-        let dirs = [[1,0], [-1,0], [0,1], [0,-1], [1,1], [-1,1], [1,-1], [-1,-1]];
-        let threats = [];
-        let openLines = [];
+        let out = `<g id="sa-sq-threats">`;
 
-        for (let p of oppPawns) {
-            for (let [dc, dr] of dirs) {
-                let nc = p.c + dc, nr = p.r + dr;
-                let endC = null, endR = null;
-                let hitMyPiece = false;
-                while (nc >= 1 && nc <= 8 && nr >= 1 && nr <= 8) {
-                    let target = lastEGGrid[nc + ',' + nr];
-                    if (target) {
-                        if (target[0] === myColor) {
-                            hitMyPiece = true;
-                            endC = nc; endR = nr;
+        // If enemy Secret Queen is identified, draw a prominent crown badge!
+        if (egSecret.oppQueenFound) {
+            let sq = egSecret.oppQueenFound;
+            let c = 'abcdefgh'.indexOf(sq[0]) + 1;
+            let r = +sq[1];
+            let p = pt(c, r);
+            out += `<circle cx="${p.x}" cy="${p.y}" r="5.6" fill="#7c3aed" fill-opacity="0.45" stroke="#c084fc" stroke-width="1.3" />`;
+            out += `<text x="${p.x}" y="${p.y}" text-anchor="middle" dominant-baseline="central" font-size="6.5">👑</text>`;
+        }
+
+        let pawnsToCast = egSecret.oppQueenFound
+            ? oppPawns.filter(p => ('abcdefgh'[p.c - 1] + p.r) === egSecret.oppQueenFound)
+            : (oppPawns.length > 0 ? oppPawns : []);
+
+        if (pawnsToCast.length > 0) {
+            let dirs = [[1,0], [-1,0], [0,1], [0,-1], [1,1], [-1,1], [1,-1], [-1,-1]];
+            let threats = [];
+            let openLines = [];
+
+            for (let p of pawnsToCast) {
+                for (let [dc, dr] of dirs) {
+                    let nc = p.c + dc, nr = p.r + dr;
+                    let endC = null, endR = null;
+                    let hitMyPiece = false;
+                    while (nc >= 1 && nc <= 8 && nr >= 1 && nr <= 8) {
+                        let target = lastEGGrid[nc + ',' + nr];
+                        if (target) {
+                            if (target[0] === myColor) {
+                                hitMyPiece = true;
+                                endC = nc; endR = nr;
+                            }
+                            break;
                         }
-                        break;
+                        endC = nc; endR = nr;
+                        nc += dc; nr += dr;
                     }
-                    endC = nc; endR = nr;
-                    nc += dc; nr += dr;
-                }
-                if (endC !== null && endR !== null) {
-                    let p1 = pt(p.c, p.r);
-                    let p2 = pt(endC, endR);
-                    if (hitMyPiece) {
-                        threats.push({ p1, p2, target: { c: endC, r: endR } });
-                    } else {
-                        openLines.push({ p1, p2 });
+                    if (endC !== null && endR !== null) {
+                        let p1 = pt(p.c, p.r);
+                        let p2 = pt(endC, endR);
+                        if (hitMyPiece) {
+                            threats.push({ p1, p2, target: { c: endC, r: endR } });
+                        } else if (egSecret.oppQueenFound) {
+                            openLines.push({ p1, p2 });
+                        }
                     }
                 }
             }
+
+            for (let l of openLines) {
+                out += `<line x1="${l.p1.x}" y1="${l.p1.y}" x2="${l.p2.x}" y2="${l.p2.y}" stroke="#a855f7" stroke-width="0.35" stroke-dasharray="1,2.5" stroke-opacity="0.3" />`;
+            }
+            for (let t of threats) {
+                out += `<line x1="${t.p1.x}" y1="${t.p1.y}" x2="${t.p2.x}" y2="${t.p2.y}" stroke="#ef4444" stroke-width="0.9" stroke-dasharray="2,1.5" stroke-opacity="0.85" />`;
+                out += `<circle cx="${t.p2.x}" cy="${t.p2.y}" r="3.2" fill="none" stroke="#ef4444" stroke-width="0.9" stroke-opacity="0.9" />`;
+                out += `<circle cx="${t.p2.x}" cy="${t.p2.y}" r="1.2" fill="#ef4444" fill-opacity="0.9" />`;
+            }
         }
 
-        let out = `<g id="sa-sq-threats">`;
-        for (let l of openLines) {
-            out += `<line x1="${l.p1.x}" y1="${l.p1.y}" x2="${l.p2.x}" y2="${l.p2.y}" stroke="#ef4444" stroke-width="0.35" stroke-dasharray="1,2.5" stroke-opacity="0.22" />`;
-        }
-        for (let t of threats) {
-            out += `<line x1="${t.p1.x}" y1="${t.p1.y}" x2="${t.p2.x}" y2="${t.p2.y}" stroke="#ef4444" stroke-width="0.9" stroke-dasharray="2,1.5" stroke-opacity="0.85" />`;
-            out += `<circle cx="${t.p2.x}" cy="${t.p2.y}" r="3.2" fill="none" stroke="#ef4444" stroke-width="0.9" stroke-opacity="0.9" />`;
-            out += `<circle cx="${t.p2.x}" cy="${t.p2.y}" r="1.2" fill="#ef4444" fill-opacity="0.9" />`;
-        }
-        for (let p of oppPawns) {
-            let p1 = pt(p.c, p.r);
-            out += `<circle cx="${p1.x}" cy="${p1.y}" r="2" fill="none" stroke="#f59e0b" stroke-width="0.75" stroke-opacity="0.85" />`;
-        }
         out += `</g>`;
         return out;
     }
