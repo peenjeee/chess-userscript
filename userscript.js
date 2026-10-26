@@ -634,17 +634,7 @@
                                         if (arg?.square) {
                                         let col = arg.color;
                                         let sq = arg.square;
-                                        showToast(`⚡ <b>SECRET QUEEN TERUNGKAP (WSS)!</b><br>Bidak ${col === 'w' ? 'Putih' : 'Hitam'} di petak <b>${sq.toUpperCase()}</b> terbuka!`, '#312e81', '#6366f1', 6000);
-                                        if (!egSecret.revealed.some(r => r.square === sq)) {
-                                        egSecret.revealed.push({ color: col, square: sq });
-                                        }
-                                        if (lastEGGrid) {
-                                        let k = ('abcdefgh'.indexOf(sq[0]) + 1) + ',' + sq[1];
-                                        if (lastEGGrid[k]) {
-                                        lastEGGrid[k] = lastEGGrid[k][0] + 'q';
-                                        }
-                                        }
-                                        render(lastEGFlipped);
+                                        applySecretQueenLeak(sq, col, 'WSS REVEAL EVENT');
                                         }
                                         } else if (data?.target === 'secretQueenSelected') {
                                         let sq = typeof data.arguments?.[0] === 'string' ? data.arguments[0] : data.arguments?.[0]?.square;
@@ -652,17 +642,7 @@
                                         let oppColor = lastEGFlipped ? 'w' : 'b';
                                         if (sq && /^[a-h][1-8]$/.test(sq)) {
                                         if (col === oppColor || (egSecret.ownSquare && egSecret.ownSquare !== sq)) {
-                                        showToast(`🎯 <b>SECRET QUEEN LAWAN TERDETEKSI DI WSS!</b><br>Petak: <b>${sq.toUpperCase()}</b>!`, '#15803d', '#22c55e', 9000);
-                                        if (!egSecret.revealed.some(r => r.square === sq)) {
-                                        egSecret.revealed.push({ color: oppColor, square: sq });
-                                        }
-                                        if (lastEGGrid) {
-                                        let k = ('abcdefgh'.indexOf(sq[0]) + 1) + ',' + sq[1];
-                                        if (lastEGGrid[k]) {
-                                        lastEGGrid[k] = lastEGGrid[k][0] + 'q';
-                                        }
-                                        }
-                                        render(lastEGFlipped);
+                                        applySecretQueenLeak(sq, oppColor, 'WSS SELECTION EVENT');
                                         } else {
                                             egSecret.ownSquare = sq;
                                         }
