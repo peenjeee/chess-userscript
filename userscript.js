@@ -658,16 +658,28 @@
                                         });
 
                                         window.addEventListener('sa-wss-move', (e) => {
-                                        let moveStr = e.detail;
-                                        if (typeof moveStr !== 'string') return;
-                                        let mFen = (moveStr.match(/[?&]fen=([^&\s]+)/) || [])[1];
-                                        if (!mFen) return;
-                                        let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
-                                        let oppColor = lastEGFlipped ? 'w' : 'b';
-                                        let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
-                                        if (oppSQ) {
-                                        applySecretQueenLeak(oppSQ, oppColor, 'WSS MOVE FEN');
-                                        }
+                                            let moveStr = e.detail;
+                                            if (typeof moveStr !== 'string') return;
+
+                                            // Check if server rejected a move with secretqueen-revealed error
+                                            if (moveStr.startsWith('error:secretqueen-revealed')) {
+                                                let parts = moveStr.split(':');
+                                                let col = parts[2] || null;
+                                                let sq = parts[3] || null;
+                                                if (sq) {
+                                                    applySecretQueenLeak(sq, col, 'WSS ERROR REVEAL');
+                                                    return;
+                                                }
+                                            }
+
+                                            let mFen = (moveStr.match(/[?&]fen=([^&\s]+)/) || [])[1];
+                                            if (!mFen) return;
+                                            let sqs = extractSecretQueensFromFen(decodeURIComponent(mFen));
+                                            let oppColor = lastEGFlipped ? 'w' : 'b';
+                                            let oppSQ = oppColor === 'w' ? sqs.white : sqs.black;
+                                            if (oppSQ) {
+                                                applySecretQueenLeak(oppSQ, oppColor, 'WSS MOVE FEN');
+                                            }
                                         });
                                         }
 
