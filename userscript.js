@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.12
+// @version      3.13
 // @description  Chess analyzer with full Stockfish 19 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
@@ -13,7 +13,7 @@
 // @connect      localhost
 // @connect      chess.0xpnj.dev
 // @connect      cdn.jsdelivr.net
-// @connect      lichess1.org
+// @connect      lichess.org
 // ==/UserScript==
 
 (function() {
@@ -54,7 +54,9 @@
         js: "d22d4e7df089b86fdcb678a795a2116d52a06e041fc91819448fc93eb3f3021f",
         wasm: "e9c04dff71870770a515f1d1257aca4d7cebe2915339e9f847aebdc0c8ca74e0"
     };
-    const NNUE_URL = "https://lichess1.org/assets/lifat/nnue/";
+    // lichess.org itself: lichess1.org now redirects there without the CORS
+    // headers a browser needs to follow it
+    const NNUE_URL = "https://lichess.org/assets/lifat/nnue/";
 
     // Relay (mirrors the game to the Chess Analyzer web app via its SSE API)
     const RELAY_URLS = location.hostname === 'localhost'

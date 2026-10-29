@@ -44,7 +44,7 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   fetched from jsDelivr at a pinned version and checked against its
   SHA-256). Each network comes once from lichess's asset host (about 1MB for
   antichess and horde, 48-59MB for the others), is checked against the hash
-  in its name and cached. Approve the `cdn.jsdelivr.net` and `lichess1.org`
+  in its name and cached. Approve the `cdn.jsdelivr.net` and `lichess.org`
   permissions if asked. Where threads are not available, or it fails, the
   script falls back to multi-variant Stockfish 10
   ([lichess-org/stockfish.js](https://github.com/lichess-org/stockfish.js),
