@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Chess Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      3.11
-// @description  Chess analyzer with full Stockfish 18 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
+// @version      3.12
+// @description  Chess analyzer with full Stockfish 19 NNUE, lichess (with variants) and endgame.ai support, and web-app relay
 // @author       Peenjeee
 // @match        https://www.chess.com/*
 // @match        https://lichess.org/*
@@ -24,15 +24,15 @@
         : 'chesscom';
     const EG_BOARD = '.board-container .board';
 
-    // Full-strength Stockfish 18 NNUE hosted on our own site (CORS-open).
+    // Full-strength Stockfish 19 NNUE hosted on our own site (CORS-open).
     // The loader reads its wasm location from the worker URL hash.
-    const REMOTE_JS = "https://chess.0xpnj.dev/stockfish-18-single.js";
-    const REMOTE_WASM = "https://chess.0xpnj.dev/stockfish-18-single.wasm";
+    const REMOTE_JS = "https://chess.0xpnj.dev/stockfish-19-single.js";
+    const REMOTE_WASM = "https://chess.0xpnj.dev/stockfish-19-single.wasm";
     // chess.com's internal engine as a fallback (chess.com pages only)
     const CC_FALLBACK = "/bundles/app/js/vendor/jschessengine/stockfish.asm.1abfa10c.js";
     // lichess variants run on multi-variant Stockfish 10 (GPLv3,
     // github.com/lichess-org/stockfish.js): one thread and no SharedArrayBuffer,
-    // so it runs wherever SF18 does. Pinned on jsDelivr and checked byte for
+    // so it runs wherever SF19 does. Pinned on jsDelivr and checked byte for
     // byte, since it runs with the page's origin.
     const MV_JS = "https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.wasm.js";
     const MV_WASM = "https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.wasm";
@@ -129,6 +129,10 @@
     });
     let idbPut = (key, buf) => idbStore('readwrite', (st, done) => {
         st.put(buf, key);
+        st.transaction.oncomplete = () => done(true);
+    });
+    let idbDel = (key) => idbStore('readwrite', (st, done) => {
+        st.delete(key);
         st.transaction.oncomplete = () => done(true);
     });
 
@@ -330,7 +334,7 @@
     // one exists (Paradigm has none). On top of the keys above: pieces maps the server's
     // own piece names to FEN letters, walls turns its stones (colour 7) into
     // walls, and setup waits until the setup drops are over. No Castling and
-    // Setup Chess are standard chess for SF18 once the board is read, and so is
+    // Setup Chess are standard chess for SF19 once the board is read, and so is
     // Chess960, whose castling rights come from its start position. Any other
     // slug, custom rules and four-player boards included, is not supported.
     const CC_VARIANTS = {
@@ -1197,13 +1201,13 @@
     // (this Stockfish build crashes otherwise) — stop, await bestmove, go.
 
     let engine = null, engineReady = false, engineFailed = false;
-    let engineStarting = false;    // one start at a time: the load is ~113MB
+    let engineStarting = false;    // one start at a time: the load is ~95MB
     let searching = false, ignoreInfo = false, pendingFen = null;
     let searchTurn = "w";          // side to move in the position being searched
     let engineFlip = false;
     let bootTimer = null, retryTimer = null;
     let usingFallback = false;
-    let engineVariant = 'chess';   // UCI_Variant the worker plays; standard chess runs on SF18
+    let engineVariant = 'chess';   // UCI_Variant the worker plays; standard chess runs on SF19
     let engineFsf = false;         // whether the worker is Fairy-Stockfish rather than SF10
     let fsfBroken = false;         // Fairy-Stockfish failed on this page: the lichess variants use SF10
     let engine960 = false;         // UCI_Chess960 as last sent to the worker
@@ -1217,10 +1221,11 @@
     async function createRemoteWorker() {
         let src = await fetchText(REMOTE_JS);
         let blobUrl = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
-        let bytes = await idbGet('sf18-wasm');
+        let bytes = await idbGet('sf19-wasm');
         if (!bytes) {
             bytes = await fetchBytes(REMOTE_WASM);
-            await idbPut('sf18-wasm', bytes);
+            await idbPut('sf19-wasm', bytes);
+            idbDel('sf18-wasm');  // the previous build, ~108MB no longer used
         }
         let wasmRef = URL.createObjectURL(new Blob([bytes], { type: "application/wasm" }));
         return new Worker(blobUrl + "#" + wasmRef);
@@ -1442,7 +1447,7 @@ if (globalThis.name !== 'em-pthread') {
             return;
         }
         engineStarting = true;
-        if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~113MB)"
+        if (btn && !usingFallback) btn.innerHTML = variant === 'chess' ? "Loading engine… (one-time ~95MB)"
             : fsf ? "Loading variant engine… (one-time, up to ~80MB)" : "Loading variant engine…";
         try {
             let w = usingFallback ? new Worker(CC_FALLBACK)
@@ -1494,7 +1499,7 @@ if (globalThis.name !== 'em-pthread') {
             stopEngine();
             engineVariant = variant;
             engineFailed = false;
-            // chess.com's own engine stood in for SF18 only, never for a variant
+            // chess.com's own engine stood in for SF19 only, never for a variant
             usingFallback = false;
             engineRetries = 0;
         }

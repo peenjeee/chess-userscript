@@ -4,7 +4,7 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
 
 1. **Analyzer** — draws the top 3 engine move suggestions (plus a dashed ponder
    arrow) directly on the board, with a live score badge.
-2. **Full-strength engine** — Stockfish 18 with the full NNUE network (~113MB,
+2. **Full-strength engine** — Stockfish 19 with the full NNUE network (~95MB,
    downloaded once and cached by the browser), the same engine the
    [Chess Analyzer web app](https://chess.0xpnj.dev) uses.
 3. **Relay** — mirrors the game you are playing to the web app's **Live** tab
@@ -28,15 +28,15 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
 
 ## Engine
 
-- On **chess.com** the script fetches the full Stockfish 18 NNUE build from
+- On **chess.com** the script fetches the full Stockfish 19 NNUE build from
   chess.0xpnj.dev and runs it in a worker. First start shows
-  *"Loading engine… (one-time ~113MB)"*; after that it starts instantly from
+  *"Loading engine… (one-time ~95MB)"*; after that it starts instantly from
   the browser cache. If the download fails it falls back to chess.com's
   built-in engine.
 - On **lichess** the script runs the same engine: it downloads it through
   Tampermonkey's `GM_xmlhttpRequest` (declared in the header — approve the
   `chess.0xpnj.dev` permission if your userscript manager asks) and caches the
-  113MB in IndexedDB, so it downloads once ever, not once per page.
+  ~95MB in IndexedDB, so it downloads once ever, not once per page.
 - **lichess variants** (King of the Hill, Three-Check, Antichess, Atomic,
   Horde, Racing Kings, Crazyhouse) run on Fairy-Stockfish 14 with the
   variant's NNUE network, the engine lichess's own analysis uses
@@ -59,7 +59,7 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   Fairy-Stockfish. The extension version runs Fairy-Stockfish with the
   variant's NNUE network there too, from its own offscreen page, which a
   userscript cannot have. No Castling, and Setup Chess once both sides have
-  set up, are standard chess for Stockfish 18. Torpedo, Sideways Pawns,
+  set up, are standard chess for Stockfish 19. Torpedo, Sideways Pawns,
   Petrified, Paradigm Chess30, Seirawan Chess, Chaturanga and Duck Chess
   need Fairy-Stockfish, so in the userscript they show "Variant needs the
   extension". Banked pieces, the side to move and the checks given are
@@ -75,7 +75,7 @@ One script, three features, three sites (**chess.com**, **lichess.org**, and **e
   or as the rook's move when the king already stands there. A Chess960 game
   on the variants server is relayed with its start position and moves, so
   the web app follows it like any other game.
-- **endgame.ai**: the script runs the same Stockfish 18 NNUE build as on
+- **endgame.ai**: the script runs the same Stockfish 19 NNUE build as on
   chess.com (cached in IndexedDB) without site-engine fallback. In **Secret
   Queen** games, hidden queens (own square + revealed pieces from API/DOM badges)
   are analyzed as queens. Includes Secret Queen Threat Overlay (red dashed danger
@@ -114,7 +114,7 @@ which needs no relay at all.
   on again). This resets the engine and resyncs it with the current board.
 - **"Engine unavailable":** the engine failed to load or crashed more than
   three times in a row (it restarts by itself before that — usually an
-  interrupted 113MB download). Press **'A'** twice to retry from scratch.
+  interrupted ~95MB download). Press **'A'** twice to retry from scratch.
 - **"Engine unavailable" on lichess:** the engine could not be loaded,
   usually because the userscript manager denied the `chess.0xpnj.dev`
   permission. Grant it (or use the extension version), then press **'A'**
